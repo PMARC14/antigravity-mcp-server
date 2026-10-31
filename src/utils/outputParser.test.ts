@@ -10,10 +10,10 @@ const fixture = (name: string) =>
   );
 
 test("parses v3 init, step_update and final result shapes", () => {
-  const stdout = fixture("agy-stream-spec.ndjson");
+  const stdout = fixture("agy-write-success.ndjson");
   const output = parseAgyOutput(stdout);
-  assert.equal(output.response, "pong");
-  assert.equal(output.conversationId, "2e89aa8e-0000-4000-8000-000000000001");
+  assert.match(output.response, /returns `a \+ b`/);
+  assert.equal(output.conversationId, "ae1e3504-5457-4ded-a5b9-b607da8afb1f");
   assert.equal(output.status, "SUCCESS");
   assert.equal(output.rawStdout, stdout);
   const init = stdout.split("\n")[0];
@@ -27,8 +27,8 @@ test("parses v3 init, step_update and final result shapes", () => {
 });
 
 test("empty response returns the denied-run stderr reason", () => {
-  const stdout = fixture("agy-denied-spec.ndjson");
-  const stderr = fixture("agy-denied-spec.stderr.txt");
+  const stdout = fixture("agy-denied.ndjson");
+  const stderr = fixture("agy-denied.stderr.txt");
   assert.equal(parseAgyOutput(stdout, stderr).response, stderr.trim());
   assert.match(formatAgyResponseForMCP(stdout, stderr), /auto-denied/);
 });
@@ -62,11 +62,11 @@ test("plain text remains compatible and full responses include stderr", () => {
   assert.equal(parseAgyOutput("legacy response\n").response, "legacy response");
   assert.match(
     formatAgyResponseForMCP(
-      fixture("agy-stream-spec.ndjson"),
+      fixture("agy-write-success.ndjson"),
       "warning",
       "full",
     ),
-    /warning[\s\S]*pong/,
+    /warning[\s\S]*has been fixed/,
   );
   assert.equal(parseAgyOutput("", "failure").response, "failure");
   assert.match(
