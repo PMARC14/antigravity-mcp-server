@@ -27,8 +27,10 @@ export const agyJobManager = new JobManager(
   undefined,
   Logger,
 );
+registerJobTools(toolRegistry, "agy", agyJobManager);
 
 toolRegistry.push(
+  agyUsageTool,
   askAgyTool,
   batchAgyTool,
   reviewAgyTool,
