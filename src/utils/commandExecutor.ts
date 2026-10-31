@@ -1,4 +1,4 @@
-import spawn from "cross-spawn";
+import { spawnCommand } from "./processSpawner.js";
 import { Logger } from "./logger.js";
 
 export interface CommandResult {
@@ -25,9 +25,10 @@ export interface ExecuteOptions {
   cwd?: string;
   /**
    * Optional content to write to the child's stdin and then close.
-   * Used for piping prompts when --print -p is not desirable.
+   * Prompts use this pipe rather than the command line.
    */
   stdin?: string;
+  trimOutput?: boolean;
 }
 
 /**
@@ -45,6 +46,7 @@ export async function executeCommandDetailed(
     retry,
     cwd,
     stdin,
+    trimOutput = true,
   } = options;
 
   let attempt = 0;
@@ -58,6 +60,7 @@ export async function executeCommandDetailed(
       maxOutputBytes,
       cwd,
       stdin,
+      trimOutput,
     });
 
     if (result.ok) return result;
@@ -95,22 +98,31 @@ async function executeOnce(
     maxOutputBytes,
     cwd,
     stdin,
+    trimOutput,
   }: Omit<ExecuteOptions, "retry">,
 ): Promise<CommandResult> {
   return new Promise((resolve) => {
     const startTime = Date.now();
     Logger.commandExecution(command, args, startTime);
 
-    const childProcess = spawn(command, args, {
-      env: process.env,
-      shell: false,
-      stdio: [stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
-      ...(cwd ? { cwd } : {}),
-    });
-
-    if (stdin !== undefined && childProcess.stdin) {
-      childProcess.stdin.write(stdin);
-      childProcess.stdin.end();
+    let childProcess;
+    try {
+      childProcess = spawnCommand(command, args, {
+        env: process.env,
+        shell: false,
+        windowsHide: true,
+        stdio: [stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
+        ...(cwd ? { cwd } : {}),
+      });
+    } catch (error) {
+      resolve({
+        ok: false,
+        code: null,
+        stdout: "",
+        stderr: String(error),
+        timedOut: false,
+      });
+      return;
     }
 
     const stdoutChunks: Buffer[] = [];
@@ -118,17 +130,21 @@ async function executeOnce(
     let totalStdoutBytes = 0;
     let isResolved = false;
     let outputExceeded = false;
+    let stdinError: Error | undefined;
+    let didTimeOut = false;
 
     const timeoutId = setTimeout(() => {
       if (!isResolved) {
+        didTimeOut = true;
         childProcess.kill("SIGTERM");
         Logger.warn(`Process timeout after ${timeoutMs}ms, sending SIGTERM`);
-        setTimeout(() => {
+        const killTimer = setTimeout(() => {
           if (!isResolved) {
             childProcess.kill("SIGKILL");
             Logger.error(`Process did not terminate, sending SIGKILL`);
           }
         }, 5000);
+        killTimer.unref();
       }
     }, timeoutMs || 600000);
 
@@ -184,22 +200,29 @@ async function executeOnce(
         clearTimeout(timeoutId);
 
         const stdout = Buffer.concat(stdoutChunks).toString("utf8");
-        const stderr = Buffer.concat(stderrChunks).toString("utf8");
-        const timedOut = signal === "SIGTERM" || signal === "SIGKILL";
+        const stderr =
+          Buffer.concat(stderrChunks).toString("utf8") ||
+          stdinError?.message ||
+          "";
+        const timedOut = didTimeOut;
 
         Logger.commandComplete(startTime, code, stdout.length);
 
         resolve({
-          ok: code === 0 && !outputExceeded,
+          ok: code === 0 && !outputExceeded && !stdinError && !timedOut,
           code,
           signal: signal || undefined,
-          stdout: stdout.trim(),
+          stdout: trimOutput ? stdout.trim() : stdout,
           stderr: stderr.trim(),
           timedOut,
           partialStdout: outputExceeded ? stdout : undefined,
         });
       }
     });
+    childProcess.stdin?.on("error", (error: Error) => {
+      stdinError = error;
+    });
+    if (stdin !== undefined) childProcess.stdin?.end(stdin);
   });
 }
 

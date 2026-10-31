@@ -18,7 +18,7 @@ npm install -g @trishchuk/antigravity-mcp-server
 Or run from source:
 
 ```bash
-pnpm install && pnpm build
+npm install && npm run build
 ```
 
 ## MCP client configuration
@@ -60,25 +60,21 @@ claude mcp add antigravity -- npx -y @trishchuk/antigravity-mcp-server
 | `health`                             | Diagnose CLI installation, authentication, models, and session state.                                                                                   |
 | `ping`, `Help`, `version`, `metrics` | Utilities.                                                                                                                                              |
 
-Background and batch tools default to `--dangerously-skip-permissions` because print mode cannot answer interactive permission prompts; pass `skipPermissions: false` to opt out.
+Background, delegate and batch tools default to `mode: "write"`, with permission skipping disabled. This changes the previous automatic full-permission behavior. Ask, digest, review, plan and brainstorm default to `mode: "read"`.
 
 ## Models
 
-The `model` parameter takes either column of `agy models` — the **model ID** (`gemini-3.7-flash-high`) or the **display label** (`Gemini 3.7 Flash (High)`). As of Antigravity CLI v1.1.14:
+The `model` parameter accepts IDs or display labels from `agy models`. Known IDs in agy 1.4.9:
 
-| Model                                      | IDs                                  |
-| ------------------------------------------ | ------------------------------------ |
-| `Gemini 3.7 Flash (Low \| Medium \| High)` | `gemini-3.7-flash-{low,medium,high}` |
-| `Gemini 3.6 Flash (Low \| Medium \| High)` | `gemini-3.6-flash-{low,medium,high}` |
-| `Gemini 3.5 Flash (Low \| Medium \| High)` | `gemini-3.5-flash-{low,medium,high}` |
-| `Gemini 3.1 Pro (Low \| High)`             | `gemini-3.1-pro-{low,high}`          |
-| `Claude Sonnet 4.6 (Thinking)`             | `claude-sonnet-4-6`                  |
-| `Claude Opus 4.6 (Thinking)`               | `claude-opus-4-6-thinking`           |
-| `GPT-OSS 120B (Medium)`                    | `gpt-oss-120b-medium`                |
+| Model             | IDs                                   |
+| ----------------- | ------------------------------------- |
+| Gemini 4 Argon    | `gemini-4-argon-{low,medium,high}`    |
+| Gemini 3.8 Flash  | `gemini-3.8-flash-{low,medium,high}`  |
+| Claude Opus 5.5   | `claude-opus-5-5-{low,medium,high}`   |
+| Claude Sonnet 5.5 | `claude-sonnet-5-5-{low,medium,high}` |
+| GPT-OSS 120B      | `gpt-oss-120b-medium`                 |
 
-Labels and tiers change between CLI releases — use the `list-models` tool for the live list.
-
-Omit `model` and the server passes no `--model` flag, so the CLI's own default applies (`"model"` in `~/.gemini/antigravity-cli/settings.json`). The label this server uses in its examples and hints is `Gemini 3.7 Flash (High)` — see `DEFAULT_MODEL` in `src/constants.ts`.
+The server explicitly defaults to `gemini-3.8-flash-high`; review uses `gemini-4-argon-high`. Claude models are only used when requested. Use `list-models` for the live list.
 
 ## Sessions and conversation resume
 
@@ -98,7 +94,7 @@ Omit `model` and the server passes no `--model` flag, so the CLI's own default a
 }
 ```
 
-How it works: `agy` doesn't print its conversation ID to stdout in print mode, so the server passes `--log-file` to a temp file and parses `Print mode: conversation=<uuid>` from it. The next call with the same `sessionId` resumes via `agy --conversation <uuid>`.
+Prompts always use one JSON-encoded NDJSON user event on stdin with `--input-format stream-json --output-format stream-json`. The server reads the conversation ID from `init` or `result` events, using the CLI log only as a fallback. The next call with the same `sessionId` resumes via `agy --conversation <uuid>`.
 
 You can also pass a native `conversationId` directly, or `continueLatest: true` for `agy --continue`.
 
@@ -108,22 +104,25 @@ Session storage is in-memory (lost on server restart). Configure with:
 - `AGY_MAX_SESSIONS` — max stored sessions (default 50)
 - `AGY_MCP_CWD` — default working directory for `agy` runs
 
-### Known quirk
+## Modes and execution options
 
-When resuming a conversation, agy print mode replays the previous assistant message before the new response. The server strips the replayed prefix automatically when it can (previous response under 1000 chars); for longer responses a leading echo may remain.
+- `read` uses `--mode plan`.
+- `write` uses `--mode accept-edits --sandbox` with the session-only settings rule `{"permissions":{"allow":["command(*)"]}}`, allowing shell commands to run headless.
+- `full` uses `--dangerously-skip-permissions` and requires an explicit request.
 
-## Safety
+Legacy `skipPermissions: true` selects full mode; `sandbox: true` selects write mode. Explicit false values disable those features (`sandbox: false` selects read when mode is omitted). Conflicting mode and legacy flags are rejected. Defaults are applied after checking caller input so `mode: "full"` works without an implicit false flag conflicting with it.
 
-- `skipPermissions: true` maps to `--dangerously-skip-permissions` — agy auto-approves all tool/command permission requests. Use deliberately.
-- `sandbox: true` maps to `--sandbox` — terminal restrictions enabled.
-- By default agy uses your configured permission rules (`/permissions` in interactive agy).
+All execution tools accept `effort` (low, medium, high, xhigh, max) and `jsonSchema` (a schema object or JSON string). Settings and schemas are individual argv elements; prompts never enter a shell or the command line.
+
+Background records stay in `~/.agy-mcp/bg/`. New records keep the full prompt in a separate file and stdout/stderr separately; old records remain readable. Tasks whose process disappeared without a recorded exit have unknown status. Delegate collection stages all changes, saves a binary-capable patch against the starting SHA, and returns at most 20k characters per output plus the patch path before optional cleanup.
 
 ## Development
 
 ```bash
-pnpm build          # tsc
-pnpm lint           # tsc --noEmit
-pnpm format         # prettier
+npm run build       # tsc
+node --test "dist/**/*.test.js"
+npm run lint        # tsc --noEmit
+npm run format      # prettier
 ```
 
 ## License

@@ -7,25 +7,54 @@ export interface AgyOutput {
   response: string;
   rawStdout: string;
   rawStderr?: string;
+  conversationId?: string;
+  status?: string;
 }
 
-/**
- * Antigravity CLI print mode emits plain text on stdout. v1.1.x also offers
- * `--output-format json|stream-json`, which this server does not use yet.
- * v1.0.x replayed the previous assistant message before the new one when
- * resuming a conversation; v1.1.14 no longer does. Either way both end up on
- * stdout — we keep everything and let "clean" mode return it verbatim.
- */
+/** Extract the final response and native conversation ID from agy NDJSON. */
 export function parseAgyOutput(
   rawStdout: string,
   rawStderr?: string,
 ): AgyOutput {
-  const trimmed = rawStdout.trim();
-  if (trimmed) Logger.agyResponse(trimmed);
+  let response: string | undefined;
+  let conversationId: string | undefined;
+  let status: string | undefined;
+  let streamSeen = false;
+  let eventError: string | undefined;
+  for (const line of rawStdout.replace(/^\uFEFF/, "").split("\n")) {
+    let data;
+    try {
+      data = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!data || typeof data.event !== "string") continue;
+    streamSeen = true;
+    if (data.event === "init") {
+      conversationId =
+        data.init?.conversation_id || data.conversation_id || conversationId;
+    } else if (data.event === "result") {
+      const result = data.result;
+      if (!result) continue;
+      conversationId = result.conversation_id || conversationId;
+      status = result.status;
+      if (typeof result.response === "string") response = result.response;
+      if (typeof result.error === "string") eventError = result.error;
+    }
+  }
+  response = streamSeen
+    ? response?.trim() ||
+      rawStderr?.trim() ||
+      eventError ||
+      "(no final response produced)"
+    : rawStdout.trim() || rawStderr?.trim() || "";
+  if (response) Logger.agyResponse(response);
   return {
-    response: trimmed,
+    response,
     rawStdout,
     rawStderr,
+    conversationId,
+    status,
   };
 }
 
@@ -43,11 +72,12 @@ export function formatAgyResponseFull(output: AgyOutput): string {
 }
 
 export function formatAgyResponseForMCP(
-  result: string,
+  result: string | AgyOutput,
   stderr?: string,
   responseMode: ResponseMode = "clean",
 ): string {
-  const parsed = parseAgyOutput(result, stderr);
+  const parsed =
+    typeof result === "string" ? parseAgyOutput(result, stderr) : result;
   if (responseMode === "full") return formatAgyResponseFull(parsed);
   return parsed.response || "(empty response)";
 }

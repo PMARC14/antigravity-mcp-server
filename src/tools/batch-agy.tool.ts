@@ -1,3 +1,4 @@
+import { executionFields, executionOptions } from "./executionOptions.js";
 import { z } from "zod";
 import { UnifiedTool, StructuredToolResult } from "./registry.js";
 import { executeAgy } from "../utils/agyExecutor.js";
@@ -25,6 +26,7 @@ interface BatchTaskResult {
 }
 
 const batchAgyArgsSchema = z.object({
+  ...executionFields,
   tasks: z
     .array(batchTaskSchema)
     .min(1)
@@ -34,12 +36,6 @@ const batchAgyArgsSchema = z.object({
     .optional()
     .describe(
       `Optional model override applied to every task. Known: ${Object.values(MODELS).join(", ")}.`,
-    ),
-  skipPermissions: z
-    .boolean()
-    .default(true)
-    .describe(
-      "--dangerously-skip-permissions (typical for batch jobs — print mode can't answer prompts)",
     ),
   parallel: z
     .boolean()
@@ -92,10 +88,10 @@ export const batchAgyTool: UnifiedTool = {
   },
   category: "agy",
   execute: async (args, onProgress) => {
+    const runOptions = executionOptions(args, "write");
     const {
       tasks,
       model,
-      skipPermissions,
       parallel,
       concurrency,
       stopOnError,
@@ -148,8 +144,8 @@ export const batchAgyTool: UnifiedTool = {
         const result = await executeAgy(
           taskPrompt,
           {
+            ...runOptions,
             model: model as string,
-            skipPermissions: Boolean(skipPermissions),
             timeout: timeout as number,
             workingDir: workingDir as string,
           },

@@ -54,7 +54,7 @@ async function sendProgressNotification(
   total?: number,
   message?: string,
 ) {
-  if (!progressToken) return;
+  if (progressToken === undefined) return;
   try {
     const params: any = { progressToken, progress };
     if (total !== undefined) params.total = total;
@@ -76,6 +76,7 @@ function startProgressUpdates(
     isProcessing: true,
     currentOperationName: operationName,
     latestOutput: "",
+    progress: 0,
   };
 
   const progressMessages = [
@@ -87,9 +88,8 @@ function startProgressUpdates(
   ];
 
   let messageIndex = 0;
-  let progress = 0;
 
-  if (progressToken) {
+  if (progressToken !== undefined) {
     sendProgressNotification(
       progressToken,
       0,
@@ -99,8 +99,8 @@ function startProgressUpdates(
   }
 
   const progressInterval = setInterval(async () => {
-    if (state.isProcessing && progressToken) {
-      progress += 1;
+    if (state.isProcessing && progressToken !== undefined) {
+      state.progress += 1;
       const baseMessage =
         progressMessages[messageIndex % progressMessages.length];
       const outputPreview = state.latestOutput.slice(-150).trim();
@@ -109,7 +109,7 @@ function startProgressUpdates(
         : baseMessage;
       await sendProgressNotification(
         progressToken,
-        progress,
+        state.progress,
         undefined,
         message,
       );
@@ -134,11 +134,11 @@ function stopProgressUpdates(
   if (progressData.state) progressData.state.isProcessing = false;
   clearInterval(progressData.interval);
 
-  if (progressData.progressToken) {
+  if (progressData.progressToken !== undefined) {
     sendProgressNotification(
       progressData.progressToken,
-      100,
-      100,
+      (progressData.state.progress += 1),
+      undefined,
       success
         ? `✅ ${operationName} completed successfully`
         : `❌ ${operationName} failed`,

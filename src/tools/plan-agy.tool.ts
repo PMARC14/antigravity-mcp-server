@@ -1,10 +1,11 @@
+import { executionFields, executionOptions } from "./executionOptions.js";
 import { z } from "zod";
 import { UnifiedTool } from "./registry.js";
 import { executeAgy } from "../utils/agyExecutor.js";
-import { formatAgyResponseForMCP } from "../utils/outputParser.js";
 import { createAgyError, formatErrorForUser } from "../utils/errorTypes.js";
 
 const planArgsSchema = z.object({
+  ...executionFields,
   goal: z
     .string()
     .min(1)
@@ -131,6 +132,7 @@ export const planAgyTool: UnifiedTool = {
       const result = await executeAgy(
         prompt,
         {
+          ...executionOptions(args),
           model: args.model as string | undefined,
           workingDir: args.workingDir as string | undefined,
           timeout: args.timeout as number | undefined,
@@ -155,7 +157,7 @@ export const planAgyTool: UnifiedTool = {
         };
       }
 
-      return formatAgyResponseForMCP(result.output, result.stderr, "clean");
+      return result.output || "(empty response)";
     } catch (error) {
       const agyErr = createAgyError(
         error instanceof Error ? error : String(error),

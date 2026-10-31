@@ -1,3 +1,4 @@
+import { executionFields, executionOptions } from "./executionOptions.js";
 import { z } from "zod";
 import { UnifiedTool } from "./registry.js";
 import {
@@ -12,6 +13,7 @@ import {
 import { MODELS } from "../constants.js";
 
 const bgAgyArgsSchema = z.object({
+  ...executionFields,
   action: z
     .enum(["start", "status", "tail", "stop", "remove", "list"])
     .describe("Background task action."),
@@ -28,23 +30,13 @@ const bgAgyArgsSchema = z.object({
     .describe(
       `Optional model override. Known: ${Object.values(MODELS).join(", ")}.`,
     ),
-  skipPermissions: z
-    .boolean()
-    .optional()
-    .describe(
-      "--dangerously-skip-permissions (default for bg tasks: true — print mode can't answer permission prompts).",
-    ),
-  sandbox: z
-    .boolean()
-    .optional()
-    .describe("--sandbox: run with terminal restrictions enabled."),
   workingDir: z.string().optional(),
   cd: z.string().optional(),
   addDirs: z.array(z.string()).optional(),
   timeout: z
     .number()
     .optional()
-    .describe("agy --print-timeout in milliseconds (default 600000)."),
+    .describe("Execution timeout in milliseconds (default 600000)."),
 
   // status/tail/stop/remove
   taskId: z.string().optional().describe("Task ID returned by action=start."),
@@ -77,6 +69,9 @@ function formatMeta(m: BgTaskMeta): Record<string, unknown> {
     exitCode: m.exitCode,
     durationMs: (m.finishedAt ?? Date.now()) - m.startedAt,
     promptPreview: m.prompt,
+    promptFile: m.promptFile,
+    stderrFile: m.stderrFile,
+    error: m.error,
   };
 }
 
@@ -104,9 +99,8 @@ export const bgAgyTool: UnifiedTool = {
       if (!prompt) throw new Error("prompt is required for action=start");
 
       const meta = await startBgTask(prompt, {
+        ...executionOptions(args, "write"),
         model: args.model as string | undefined,
-        skipPermissions: args.skipPermissions as boolean | undefined,
-        sandbox: args.sandbox as boolean | undefined,
         workingDir: (args.workingDir || args.cd) as string | undefined,
         cd: args.cd as string | undefined,
         addDirs: args.addDirs as string[] | undefined,
@@ -116,7 +110,7 @@ export const bgAgyTool: UnifiedTool = {
 
       const m = formatMeta(meta);
       return {
-        text: `✅ Background task started\n\ntaskId: ${meta.taskId}\npid: ${meta.pid}\nworkingDir: ${meta.workingDir ?? "(default)"}\n\nPoll with:  bg-antigravity action=status taskId=${meta.taskId}\nTail logs:  bg-antigravity action=tail taskId=${meta.taskId}\nStop:       bg-antigravity action=stop taskId=${meta.taskId}`,
+        text: `Background task ${meta.state === "failed" ? "failed" : "started"}${meta.error ? `: ${meta.error}` : ""}\n\ntaskId: ${meta.taskId}\npid: ${meta.pid}\nworkingDir: ${meta.workingDir ?? "(default)"}\n\nPoll with:  bg-antigravity action=status taskId=${meta.taskId}\nTail logs:  bg-antigravity action=tail taskId=${meta.taskId}\nStop:       bg-antigravity action=stop taskId=${meta.taskId}`,
         structuredContent: { task: m },
       };
     }

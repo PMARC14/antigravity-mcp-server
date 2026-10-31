@@ -1,3 +1,4 @@
+import { executionFields, executionOptions } from "./executionOptions.js";
 import { z } from "zod";
 import { UnifiedTool } from "./registry.js";
 import { Logger } from "../utils/logger.js";
@@ -108,12 +109,13 @@ ${domain ? `Given the ${domain} domain, I'll apply the most effective combinatio
 }
 
 const brainstormArgsSchema = z.object({
+  ...executionFields,
   prompt: z.string().min(1).describe("Brainstorming challenge or question"),
   model: z
     .string()
     .optional()
     .describe(
-      `Optional model override. Known: ${Object.values(MODELS).join(", ")}. If omitted, uses your Antigravity CLI default.`,
+      `Optional model override. Known: ${Object.values(MODELS).join(", ")}. Defaults to gemini-3.8-flash-high.`,
     ),
   cd: z.string().optional().describe("Working directory"),
   methodology: z
@@ -209,6 +211,7 @@ export const brainstormTool: UnifiedTool = {
     return await executeAgyCLI(
       enhancedPrompt,
       {
+        ...executionOptions(args),
         model: model as string | undefined,
         cd: cd as string | undefined,
       },

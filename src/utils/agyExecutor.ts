@@ -2,31 +2,25 @@ import { readFileSync } from "fs";
 import { executeCommandDetailed, RetryOptions } from "./commandExecutor.js";
 import { Logger } from "./logger.js";
 import { CLI, ERROR_MESSAGES } from "../constants.js";
-import { AgyCommandBuilder } from "./agyCommandBuilder.js";
+import {
+  AgyCommandBuilder,
+  AgyCommandBuilderOptions,
+} from "./agyCommandBuilder.js";
+import { parseAgyOutput } from "./outputParser.js";
 import { metrics } from "./metrics.js";
 
 export interface AgyExecutionResult {
-  output: string; // stdout — main response
+  output: string; // Final response, or the stderr reason when empty.
   stderr: string; // stderr — may contain status hints
   exitCode: number | null;
-  /** Native conversation ID parsed from the CLI log (for --conversation resume). */
+  /** Native conversation ID from stream events, with the CLI log as fallback. */
   conversationId?: string;
 }
 
-export interface AgyExecOptions {
-  readonly model?: string;
-  readonly skipPermissions?: boolean;
-  readonly sandbox?: boolean;
-  readonly cd?: string;
-  readonly workingDir?: string;
-  readonly timeoutMs?: number;
+export interface AgyExecOptions extends AgyCommandBuilderOptions {
   readonly timeout?: number;
   readonly maxOutputBytes?: number;
   readonly retry?: RetryOptions;
-  readonly useStdinForLongPrompts?: boolean;
-  readonly addDirs?: string[];
-  readonly conversationId?: string;
-  readonly continueLatest?: boolean;
   readonly dryRun?: boolean;
 }
 
@@ -98,7 +92,6 @@ export async function executeAgy(
       ...options,
       timeoutMs,
       concisePrompt: Boolean(options?.concise),
-      useStdinForLongPrompts: options?.useStdinForLongPrompts !== false,
     },
   );
 
@@ -112,21 +105,21 @@ export async function executeAgy(
   }
 
   try {
-    // Give the process a grace window beyond agy's own --print-timeout so the
-    // CLI gets the chance to report its timeout before we SIGTERM it.
     const result = await executeCommandDetailed(CLI.COMMANDS.AGY, args, {
       onProgress,
-      timeoutMs: timeoutMs + 15000,
+      timeoutMs,
       maxOutputBytes: options?.maxOutputBytes,
       retry: options?.retry,
       cwd: workingDir,
       stdin,
     });
 
-    const conversationId = parseConversationIdFromLog(logFile) || undefined;
+    const parsed = parseAgyOutput(result.stdout, result.stderr);
+    const conversationId =
+      parsed.conversationId || parseConversationIdFromLog(logFile) || undefined;
 
-    if (!result.ok) {
-      const errorMessage = result.stderr || result.stdout || "Unknown error";
+    if (!result.ok || (parsed.status && parsed.status !== "SUCCESS")) {
+      const errorMessage = result.stderr || parsed.response || "Unknown error";
 
       if (
         errorMessage.includes("command not found") ||
@@ -152,9 +145,7 @@ export async function executeAgy(
         errorMessage.includes("permission") ||
         errorMessage.includes("denied")
       ) {
-        throw new Error(
-          `Permission denied. Try skipPermissions:true: ${errorMessage}`,
-        );
+        throw new Error(`Permission denied: ${errorMessage}`);
       }
       if (result.timedOut) {
         throw new Error(`Antigravity CLI timed out after ${timeoutMs}ms`);
@@ -166,7 +157,7 @@ export async function executeAgy(
     }
 
     return {
-      output: result.stdout,
+      output: parsed.response,
       stderr: result.stderr,
       exitCode: result.code,
       conversationId,

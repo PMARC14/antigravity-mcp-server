@@ -1,3 +1,4 @@
+import { executionFields, executionOptions } from "./executionOptions.js";
 import { z } from "zod";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
@@ -6,9 +7,15 @@ import { randomBytes } from "crypto";
 import { UnifiedTool } from "./registry.js";
 import { startBgTask, getBgTask } from "../utils/bgTaskManager.js";
 import { executeCommandDetailed } from "../utils/commandExecutor.js";
+import { sanitizeLabel } from "../utils/labels.js";
+import {
+  collectWorktree,
+  capCollectedOutput,
+} from "../utils/worktreeCollect.js";
 import { resolveWorkingDirectory } from "../utils/workingDirResolver.js";
 
 const delegateArgsSchema = z.object({
+  ...executionFields,
   action: z
     .enum(["start", "status", "collect"])
     .default("start")
@@ -35,7 +42,7 @@ const delegateArgsSchema = z.object({
     .string()
     .optional()
     .describe(
-      "Name for the new branch in the worktree. Default: agy/<random>.",
+      "Name for the new branch in the worktree. Sanitized to [a-z0-9-], at most 40 characters. Default: agy-<random>.",
     ),
   workingDir: z
     .string()
@@ -51,7 +58,7 @@ const delegateArgsSchema = z.object({
   timeout: z
     .number()
     .optional()
-    .describe("agy --print-timeout in milliseconds (default 600000)."),
+    .describe("Execution timeout in milliseconds (default 600000)."),
   // For status/collect
   taskId: z.string().optional(),
   cleanup: z
@@ -68,6 +75,7 @@ interface DelegationMeta {
   worktreePath: string;
   branchName: string;
   baseBranch: string;
+  baseSha?: string;
   repoRoot: string;
 }
 
@@ -142,7 +150,7 @@ function buildDelegationPrompt(args: {
 export const delegateAgyTool: UnifiedTool = {
   name: "delegate-antigravity",
   description:
-    "Delegate an implementation task to Antigravity in an isolated git worktree. The agent runs autonomously (--dangerously-skip-permissions) on a fresh branch, optionally looping against a test command. Returns a taskId; later 'collect' to grab the diff. Safe: changes are sandboxed, caller reviews & applies.",
+    "Delegate an implementation task to Antigravity in an isolated git worktree. The agent defaults to sandboxed write mode on a fresh branch, optionally looping against a test command. Returns a taskId; later 'collect' to grab the diff. Safe: changes are sandboxed, caller reviews & applies.",
   zodSchema: delegateArgsSchema,
   annotations: {
     readOnlyHint: false,
@@ -162,6 +170,8 @@ export const delegateAgyTool: UnifiedTool = {
         prompt: task,
       });
 
+      const runOptions = executionOptions(args, "write");
+
       // Confirm it's a git repo
       const isRepo = await runGit(repoRoot, ["rev-parse", "--show-toplevel"]);
       if (!isRepo.ok) {
@@ -169,18 +179,29 @@ export const delegateAgyTool: UnifiedTool = {
       }
       const actualRoot = isRepo.stdout.trim();
 
-      const baseBranch =
-        (args.baseBranch as string | undefined) ||
-        (await runGit(actualRoot, ["rev-parse", "HEAD"])).stdout.trim();
-
-      const branchName =
+      const baseBranch = (args.baseBranch as string | undefined) || "HEAD";
+      const base = await runGit(actualRoot, [
+        "rev-parse",
+        "--verify",
+        baseBranch + "^{commit}",
+      ]);
+      if (!base.ok)
+        throw new Error(base.stderr || "Cannot resolve base commit");
+      const baseSha = base.stdout.trim();
+      const label = sanitizeLabel(
         (args.branchName as string | undefined) ||
-        `agy/${randomBytes(4).toString("hex")}`;
+          "agy-" + randomBytes(4).toString("hex"),
+      );
+      const branchName = label;
+      const status = await runGit(actualRoot, ["status", "--porcelain"]);
+      const warning = status.stdout
+        ? "\nWarning: uncommitted changes in the original checkout are not included.\n"
+        : "";
 
       ensureDir();
       const worktreePath = join(
         DELEGATIONS_DIR,
-        `wt-${randomBytes(4).toString("hex")}`,
+        "wt-" + label + "-" + randomBytes(4).toString("hex"),
       );
 
       const add = await runGit(actualRoot, [
@@ -189,7 +210,7 @@ export const delegateAgyTool: UnifiedTool = {
         "-b",
         branchName,
         worktreePath,
-        baseBranch,
+        baseSha,
       ]);
       if (!add.ok) {
         return `❌ Failed to create worktree:\n${add.stderr}`;
@@ -202,9 +223,15 @@ export const delegateAgyTool: UnifiedTool = {
         worktreePath,
       });
 
+      const gitDir = await runGit(worktreePath, [
+        "rev-parse",
+        "--absolute-git-dir",
+      ]);
+      if (!gitDir.ok) throw new Error(gitDir.stderr);
       const meta = await startBgTask(prompt, {
+        ...runOptions,
+        addDirs: [gitDir.stdout.trim()],
         model: args.model as string | undefined,
-        skipPermissions: true,
         workingDir: worktreePath,
         timeoutMs: args.timeout as number | undefined,
         label: `delegate:${branchName}`,
@@ -216,18 +243,22 @@ export const delegateAgyTool: UnifiedTool = {
         worktreePath,
         branchName,
         baseBranch,
+        baseSha,
         repoRoot: actualRoot,
       };
       saveIndex(index);
 
       return {
-        text: `🚀 Delegated to Antigravity in isolated worktree\n\ntaskId:    ${meta.taskId}\nbranch:    ${branchName}\nworktree:  ${worktreePath}\nbase:      ${baseBranch.slice(0, 12)}\n\nPoll:    delegate-antigravity action=status taskId=${meta.taskId}\nCollect: delegate-antigravity action=collect taskId=${meta.taskId}`,
+        text: `🚀 Delegated to Antigravity in isolated worktree\n\ntaskId:    ${meta.taskId}\nbranch:    ${branchName}\nworktree:  ${worktreePath}\nbase:      ${baseSha.slice(0, 12)}${warning}\n\nPoll:    delegate-antigravity action=status taskId=${meta.taskId}\nCollect: delegate-antigravity action=collect taskId=${meta.taskId}`,
         structuredContent: {
           taskId: meta.taskId,
           worktreePath,
           branchName,
           baseBranch,
+          baseSha,
           pid: meta.pid,
+          state: meta.state,
+          error: meta.error,
         },
       };
     }
@@ -265,59 +296,32 @@ export const delegateAgyTool: UnifiedTool = {
         return `⏳ Task ${taskId} still running. Run \`bg-antigravity action=stop taskId=${taskId}\` first, or wait for completion.`;
       }
 
-      const diff = await runGit(delegation.worktreePath, [
-        "diff",
-        delegation.baseBranch,
-      ]);
-      const stat = await runGit(delegation.worktreePath, [
-        "diff",
-        "--stat",
-        delegation.baseBranch,
-      ]);
-      const untracked = await runGit(delegation.worktreePath, [
-        "ls-files",
-        "--others",
-        "--exclude-standard",
-      ]);
-
-      let cleanupNote = "";
-      if (args.cleanup) {
-        const rm = await runGit(delegation.repoRoot, [
-          "worktree",
-          "remove",
-          "--force",
-          delegation.worktreePath,
-        ]);
-        const del = await runGit(delegation.repoRoot, [
-          "branch",
-          "-D",
-          delegation.branchName,
-        ]);
-        cleanupNote = `\n\n🧹 Cleanup: worktree removed (${rm.ok ? "ok" : "failed"}), branch deleted (${del.ok ? "ok" : "failed"}).`;
+      const patchPath = join(DELEGATIONS_DIR, taskId + ".patch");
+      const collected = await collectWorktree(
+        delegation,
+        patchPath,
+        Boolean(args.cleanup),
+      );
+      if (collected.cleaned) {
         delete idx[taskId];
         saveIndex(idx);
       }
-
-      const truncatedDiff =
-        diff.stdout.length > 200_000
-          ? diff.stdout.slice(0, 200_000) +
-            `\n\n… [diff truncated at 200KB; full diff at ${delegation.worktreePath}]`
-          : diff.stdout;
-
-      return {
-        text: `📦 Delegation ${taskId} collected\n\nbranch:    ${delegation.branchName}\nstate:     ${bg.state} (exit ${bg.exitCode ?? "n/a"})\nworktree:  ${delegation.worktreePath}\n\n--- diffstat ---\n${stat.stdout || "(no changes)"}\n${untracked.stdout ? `\n--- untracked ---\n${untracked.stdout}` : ""}\n\n--- diff ---\n${truncatedDiff || "(no committed changes — check untracked above)"}${cleanupNote}`,
-        structuredContent: {
+      const text = `Delegation ${taskId} collected\nbranch: ${delegation.branchName}\nstate: ${bg.state}\n${collected.cleanupNote}\n\n--- diffstat ---\n${collected.diffstat || "(no changes)"}\n--- diff ---\n${collected.diff || "(no changes)"}`;
+      return capCollectedOutput(
+        text,
+        {
           taskId,
           branch: delegation.branchName,
           worktreePath: delegation.worktreePath,
           state: bg.state,
           exitCode: bg.exitCode,
-          diffstat: stat.stdout,
-          diff: diff.stdout,
-          untracked: untracked.stdout.split("\n").filter(Boolean),
-          cleaned: Boolean(args.cleanup),
+          cleaned: collected.cleaned,
+          cleanupNote: collected.cleanupNote.slice(0, 2000),
         },
-      };
+        collected.diffstat,
+        collected.diff,
+        patchPath,
+      );
     }
 
     throw new Error(`Unknown action: ${action}`);

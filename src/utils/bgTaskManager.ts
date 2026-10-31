@@ -1,4 +1,8 @@
-import { spawn } from "child_process";
+import { spawnCommand } from "./processSpawner.js";
+import { parseAgyOutput } from "./outputParser.js";
+import { sanitizeLabel } from "./labels.js";
+import { resolveAgyMode } from "./agyCommandBuilder.js";
+import { DEFAULT_MODEL } from "../constants.js";
 import {
   existsSync,
   mkdirSync,
@@ -25,25 +29,22 @@ import { metrics } from "./metrics.js";
 /**
  * Background task manager for Antigravity CLI.
  *
- * Runs agy processes detached from the MCP server so callers can fire-and-forget
- * long-running agent work and poll for status. State is persisted to disk so
- * tasks survive MCP server restarts.
+ * Runs agy processes in the background and persists records for later polling.
+ * POSIX children are detached; Windows children stay attached to avoid consoles.
  *
  * Layout:
  *   ~/.agy-mcp/bg/
  *     <taskId>.json    — metadata (pid, exit code, timestamps, conversation id)
- *     <taskId>.log     — merged stdout + stderr stream from the child
- *     <taskId>.agylog  — agy's own CLI log (--log-file) — conversation ID source
+ *     <taskId>.log     — stdout (merged stdout/stderr in legacy records)
+ *     <taskId>.stderr  — stderr
+ *     <taskId>.prompt  — full prompt
+ *     <taskId>.agylog  — fallback CLI log
  */
 
 const STATE_DIR = join(homedir(), ".agy-mcp", "bg");
 
 export type BgTaskState =
-  | "running"
-  | "completed"
-  | "failed"
-  | "killed"
-  | "unknown";
+  "running" | "completed" | "failed" | "killed" | "unknown";
 
 export interface BgTaskMeta {
   taskId: string;
@@ -58,6 +59,9 @@ export interface BgTaskMeta {
   exitCode?: number | null;
   conversationId?: string;
   label?: string;
+  promptFile?: string;
+  stderrFile?: string;
+  error?: string;
 }
 
 function ensureDir(): void {
@@ -92,6 +96,7 @@ function writeMeta(meta: BgTaskMeta): void {
 }
 
 function isAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
     return true;
@@ -101,22 +106,35 @@ function isAlive(pid: number): boolean {
 }
 
 function liftConversationId(meta: BgTaskMeta): void {
-  if (meta.conversationId) return;
-  const id = parseConversationIdFromLog(agyLogPath(meta.taskId));
+  let id: string | undefined;
+  try {
+    id = parseAgyOutput(
+      readFileSync(logPath(meta.taskId), "utf8"),
+    ).conversationId;
+  } catch {
+    /* Not created yet. */
+  }
+  id ||=
+    meta.conversationId ||
+    parseConversationIdFromLog(agyLogPath(meta.taskId)) ||
+    undefined;
   if (id) meta.conversationId = id;
 }
 
 /**
  * Reconcile on-disk state with reality: if the meta says "running" but the PID
- * is gone, mark as completed/failed using the log tail.
+ * is gone, mark unknown rather than inventing an exit status.
  */
 function reconcile(meta: BgTaskMeta): BgTaskMeta {
   if (meta.state !== "running") return meta;
-  if (isAlive(meta.pid)) return meta;
+  if (isAlive(meta.pid)) {
+    liftConversationId(meta);
+    return meta;
+  }
 
-  meta.state = "completed";
+  meta.state = "unknown";
   meta.finishedAt = meta.finishedAt ?? Date.now();
-  // We can't recover exit code post-mortem; leave as null and trust log tail.
+  // The original exit code cannot be recovered after a restart.
   meta.exitCode = meta.exitCode ?? null;
 
   liftConversationId(meta);
@@ -137,66 +155,101 @@ export async function startBgTask(
 
   const taskId = randomBytes(6).toString("hex");
   const builder = new AgyCommandBuilder();
-  // Background tasks need full autonomy: agy print mode can't answer
-  // permission prompts, so default to skipping them unless caller opts out.
-  const finalSkipPermissions =
-    options.skipPermissions !== undefined ? options.skipPermissions : true;
+  const mode = resolveAgyMode(options, "write");
   const { args, workingDir, stdin } = await builder.build(prompt, {
     ...options,
-    skipPermissions: finalSkipPermissions,
+    mode,
     logFile: agyLogPath(taskId),
-    useStdinForLongPrompts: true,
   });
+  const promptFile = join(STATE_DIR, taskId + ".prompt");
+  const stderrFile = join(STATE_DIR, taskId + ".stderr");
+  writeFileSync(promptFile, prompt, "utf8");
+  const meta: BgTaskMeta = {
+    taskId,
+    pid: 0,
+    state: "unknown",
+    prompt: prompt.slice(0, 500),
+    promptFile,
+    stderrFile,
+    workingDir,
+    model: options.model ?? DEFAULT_MODEL,
+    args,
+    startedAt: Date.now(),
+    label: options.label ? sanitizeLabel(options.label) : undefined,
+  };
+  writeMeta(meta);
 
-  const logFd = openSync(logPath(taskId), "a");
+  let stdoutFd: number | undefined;
+  let stderrFd: number | undefined;
+  let settled = false;
+  let timeoutId: NodeJS.Timeout | undefined;
+  const finish = (state: BgTaskState, code: number | null, error?: string) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timeoutId);
+    meta.state = state;
+    meta.exitCode = code;
+    meta.error = error;
+    meta.finishedAt = Date.now();
+    liftConversationId(meta);
+    try {
+      writeMeta(meta);
+    } catch (err) {
+      Logger.error("Failed to save bg task:", err);
+    }
+  };
   try {
-    const child = spawn("agy", args, {
+    stdoutFd = openSync(logPath(taskId), "a");
+    stderrFd = openSync(stderrFile, "a");
+    const child = spawnCommand("agy", args, {
       cwd: workingDir,
-      detached: true,
-      stdio: ["pipe", logFd, logFd],
+      detached: process.platform !== "win32",
+      windowsHide: true,
+      shell: false,
+      stdio: [stdin !== undefined ? "pipe" : "ignore", stdoutFd, stderrFd],
       env: process.env,
     });
-
-    if (stdin && child.stdin) {
-      child.stdin.write(stdin);
-      child.stdin.end();
-    } else if (child.stdin) {
-      child.stdin.end();
-    }
-
-    child.unref();
-
-    const meta: BgTaskMeta = {
-      taskId,
-      pid: child.pid as number,
-      state: "running",
-      prompt: prompt.length > 500 ? prompt.slice(0, 500) + "…" : prompt,
-      workingDir,
-      model: options.model,
-      args,
-      startedAt: Date.now(),
-      label: options.label,
-    };
-
-    // Track exit even though we're detached — works while the MCP server lives.
-    child.on("exit", (code, signal) => {
-      const current = readMeta(taskId);
-      if (!current) return;
-      current.state = signal ? "killed" : code === 0 ? "completed" : "failed";
-      current.exitCode = code;
-      current.finishedAt = Date.now();
-      liftConversationId(current);
-      writeMeta(current);
+    child.on("error", (error) => finish("failed", null, error.message));
+    child.stdin?.on("error", (error: NodeJS.ErrnoException) => {
+      // A child that exits before reading all of stdin is not a failure:
+      // POSIX reports EPIPE, Windows reports EOF (or ECONNRESET).
+      if (["EPIPE", "EOF", "ECONNRESET"].includes(error.code ?? "")) return;
+      finish("failed", null, error.message);
+      child.kill();
     });
-
-    writeMeta(meta);
+    child.on("close", (code, signal) =>
+      finish(signal ? "killed" : code === 0 ? "completed" : "failed", code),
+    );
+    await new Promise<void>((resolve) => {
+      child.once("error", () => resolve());
+      child.once("spawn", () => {
+        meta.pid = child.pid!;
+        meta.state = "running";
+        try {
+          writeMeta(meta);
+        } catch (error) {
+          finish("failed", null, String(error));
+          child.kill();
+          resolve();
+          return;
+        }
+        timeoutId = setTimeout(() => {
+          finish("failed", null, "Execution timed out");
+          child.kill("SIGKILL");
+        }, options.timeoutMs ?? 600000);
+        timeoutId.unref();
+        child.stdin?.end(stdin);
+        child.unref();
+        resolve();
+      });
+    });
+    return meta;
+  } catch (error) {
+    finish("failed", null, String(error));
     return meta;
   } finally {
-    // The child inherits the fd; we can close our handle.
-    try {
-      closeSync(logFd);
-    } catch {
-      /* ignore */
+    for (const fd of [stdoutFd, stderrFd]) {
+      if (fd !== undefined) closeSync(fd);
     }
   }
 }
@@ -220,7 +273,12 @@ export function listBgTasks(): BgTaskMeta[] {
 }
 
 export function tailLog(taskId: string, lines: number = 100): string {
-  const p = logPath(taskId);
+  const stdout = tailFile(logPath(taskId), lines);
+  const stderr = tailFile(join(STATE_DIR, `${taskId}.stderr`), lines);
+  return stdout + (stderr ? `\n--- stderr ---\n${stderr}` : "");
+}
+
+function tailFile(p: string, lines: number): string {
   if (!existsSync(p)) return "";
   // For typical task logs (<few MB) just read fully then slice.
   // Bound: cap at 5MB read to be safe.
@@ -278,6 +336,10 @@ export function removeBgTask(taskId: string): boolean {
     if (existsSync(metaPath(taskId))) unlinkSync(metaPath(taskId));
     if (existsSync(logPath(taskId))) unlinkSync(logPath(taskId));
     if (existsSync(agyLogPath(taskId))) unlinkSync(agyLogPath(taskId));
+    for (const suffix of [".stderr", ".prompt"]) {
+      const file = join(STATE_DIR, taskId + suffix);
+      if (existsSync(file)) unlinkSync(file);
+    }
     return true;
   } catch (err) {
     Logger.warn(`Failed to remove ${taskId}: ${err}`);

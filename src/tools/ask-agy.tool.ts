@@ -1,3 +1,4 @@
+import { executionFields, executionOptions } from "./executionOptions.js";
 import { z } from "zod";
 import { UnifiedTool } from "./registry.js";
 import { executeAgy } from "../utils/agyExecutor.js";
@@ -18,6 +19,7 @@ import {
 import { resolveWorkingDirectory } from "../utils/workingDirResolver.js";
 
 const askAgyArgsSchema = z.object({
+  ...executionFields,
   prompt: z
     .string()
     .min(1)
@@ -30,18 +32,8 @@ const askAgyArgsSchema = z.object({
     .describe(
       `Optional model override (display label from \`agy models\`). Known: ${Object.values(
         MODELS,
-      ).join(", ")}. If omitted, uses your Antigravity CLI default.`,
+      ).join(", ")}. Defaults to gemini-3.8-flash-high.`,
     ),
-  skipPermissions: z
-    .boolean()
-    .optional()
-    .describe(
-      "⚠️ --dangerously-skip-permissions: auto-approve all tool permission requests.",
-    ),
-  sandbox: z
-    .boolean()
-    .optional()
-    .describe("--sandbox: run with terminal restrictions enabled."),
   cd: z.string().optional().describe("Working directory"),
   workingDir: z
     .string()
@@ -111,8 +103,6 @@ export const askAgyTool: UnifiedTool = {
     const {
       prompt,
       model,
-      skipPermissions,
-      sandbox,
       cd,
       workingDir,
       addDirs,
@@ -150,21 +140,18 @@ export const askAgyTool: UnifiedTool = {
         prompt: prompt as string,
       });
 
-      let previousResponse: string | undefined;
       if (activeSessionId && resolvedWorkingDir) {
         const session = getOrCreateSession(resolvedWorkingDir, activeSessionId);
         activeSessionId = session.sessionId;
         if (!conversationId) conversationId = session.conversationId;
-        previousResponse = session.lastResponse || undefined;
       }
 
       try {
         const result = await executeAgy(
           prompt as string,
           {
+            ...executionOptions(args),
             model: model as string,
-            skipPermissions: Boolean(skipPermissions),
-            sandbox: Boolean(sandbox),
             cd: cd as string,
             workingDir: workingDir as string,
             addDirs: addDirs as string[] | undefined,
@@ -176,21 +163,7 @@ export const askAgyTool: UnifiedTool = {
           onProgress,
         );
 
-        // When resuming, agy print mode replays the previous assistant message
-        // before the new one. Strip it when we know the full prior response
-        // (lastResponse is stored truncated at 1000 chars — only strip when
-        // it was short enough to be complete).
-        let outputText = result.output;
-        if (
-          conversationId &&
-          previousResponse &&
-          previousResponse.length < 1000 &&
-          outputText.startsWith(previousResponse)
-        ) {
-          outputText = outputText
-            .slice(previousResponse.length)
-            .replace(/^\n+/, "");
-        }
+        const outputText = result.output;
 
         if (activeSessionId) {
           if (result.conversationId) {
@@ -206,7 +179,11 @@ export const askAgyTool: UnifiedTool = {
         }
 
         return formatAgyResponseForMCP(
-          outputText,
+          {
+            response: outputText,
+            rawStdout: outputText,
+            rawStderr: result.stderr,
+          },
           result.stderr,
           (responseMode as ResponseMode) || "clean",
         );

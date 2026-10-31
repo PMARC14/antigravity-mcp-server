@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Target agy 1.4.9: stdin NDJSON prompts, stream-json results and native conversation IDs, mode/effort/schema options, refreshed models and explicit Gemini defaults.
+- **Breaking:** background, delegate and batch default to sandboxed write mode with permission skipping disabled. Full permissions require an explicit request; conflicting legacy flags are rejected.
+- Hide spawned windows, resolve npm shims without a shell, handle child/stdin errors, and keep separate background stderr and full prompt files in the existing store.
+- Delegate collection records the base SHA, includes new/binary/committed files, saves the patch before cleanup and caps returned output at 20k characters plus its path.
+- Accept progress token 0 and keep completion progress monotonic.
+
 ## [0.2.0] - 2026-08-18
 
 Support for Antigravity CLI **v1.1.14** (previously targeted v1.0.7).

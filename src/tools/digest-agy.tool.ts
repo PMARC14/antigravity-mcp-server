@@ -1,3 +1,4 @@
+import { executionFields, executionOptions } from "./executionOptions.js";
 import { z } from "zod";
 import { existsSync, statSync, readdirSync, readFileSync } from "fs";
 import { join, resolve, isAbsolute, extname } from "path";
@@ -9,6 +10,7 @@ import { resolveWorkingDirectory } from "../utils/workingDirResolver.js";
 import { Logger } from "../utils/logger.js";
 
 const digestArgsSchema = z.object({
+  ...executionFields,
   question: z
     .string()
     .min(1)
@@ -336,17 +338,21 @@ export const digestAgyTool: UnifiedTool = {
       const result = await executeAgy(
         prompt,
         {
+          ...executionOptions(args),
           model: args.model as string | undefined,
           workingDir,
           timeout: args.timeout as number | undefined,
           // Long prompts go via stdin automatically (>100K).
-          useStdinForLongPrompts: true,
         },
         onProgress,
       );
 
       const text = formatAgyResponseForMCP(
-        result.output,
+        {
+          response: result.output,
+          rawStdout: result.output,
+          rawStderr: result.stderr,
+        },
         result.stderr,
         "clean",
       );

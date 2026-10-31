@@ -1,12 +1,14 @@
+import { executionFields, executionOptions } from "./executionOptions.js";
 import { z } from "zod";
 import { UnifiedTool } from "./registry.js";
 import { executeCommandDetailed } from "../utils/commandExecutor.js";
 import { executeAgyCLI } from "../utils/agyExecutor.js";
-import { MODELS } from "../constants.js";
+import { MODELS, REVIEW_MODEL } from "../constants.js";
 import { Logger } from "../utils/logger.js";
 import { resolveWorkingDirectory } from "../utils/workingDirResolver.js";
 
 const reviewAgyArgsSchema = z.object({
+  ...executionFields,
   prompt: z
     .string()
     .optional()
@@ -33,7 +35,7 @@ const reviewAgyArgsSchema = z.object({
     .string()
     .optional()
     .describe(
-      `Optional model override. Known: ${Object.values(MODELS).join(", ")}. If omitted, uses your Antigravity CLI default.`,
+      `Optional model override. Known: ${Object.values(MODELS).join(", ")}. Defaults to gemini-4-argon-high.`,
     ),
   workingDir: z
     .string()
@@ -141,6 +143,7 @@ export const reviewAgyTool: UnifiedTool = {
   },
   category: "agy",
   execute: async (args, onProgress) => {
+    const runOptions = executionOptions(args);
     const {
       prompt,
       uncommitted,
@@ -181,14 +184,15 @@ export const reviewAgyTool: UnifiedTool = {
       const response = await executeAgyCLI(
         reviewPrompt,
         {
-          model: model as string | undefined,
+          ...runOptions,
+          model: (model as string | undefined) ?? REVIEW_MODEL,
           workingDir: resolvedDir,
           timeoutMs: (timeout as number) || 600000,
         },
         onProgress,
       );
 
-      const header = `## Code Review Results\n\n**Model:** ${model ?? "Antigravity CLI default"}\n${
+      const header = `## Code Review Results\n\n**Model:** ${model ?? REVIEW_MODEL}\n${
         base ? `**Base:** ${base}\n` : ""
       }${commit ? `**Commit:** ${commit}\n` : ""}${title ? `**Title:** ${title}\n` : ""}\n`;
 

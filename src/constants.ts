@@ -24,36 +24,25 @@ export const STATUS_MESSAGES = {
   PROCESSING_COMPLETE: "✅ Analysis completed successfully",
 } as const;
 
-// Known Antigravity CLI models (from `agy models`, CLI v1.1.14).
-// `agy models` prints `<id>\t<display label>`; `--model` accepts either form,
-// e.g. --model "Gemini 3.7 Flash (High)" or --model gemini-3.7-flash-high.
-// We keep display labels here because they are what the CLI echoes back in
-// its "unknown model" error listing. Run the `list-models` tool for the live
-// list — labels and tiers change between CLI releases.
+// Known model IDs from agy 1.4.9.
 export const MODELS = {
-  GEMINI_3_7_FLASH_LOW: "Gemini 3.7 Flash (Low)",
-  GEMINI_3_7_FLASH_MEDIUM: "Gemini 3.7 Flash (Medium)",
-  GEMINI_3_7_FLASH_HIGH: "Gemini 3.7 Flash (High)",
-  GEMINI_3_6_FLASH_LOW: "Gemini 3.6 Flash (Low)",
-  GEMINI_3_6_FLASH_MEDIUM: "Gemini 3.6 Flash (Medium)",
-  GEMINI_3_6_FLASH_HIGH: "Gemini 3.6 Flash (High)",
-  GEMINI_3_5_FLASH_LOW: "Gemini 3.5 Flash (Low)",
-  GEMINI_3_5_FLASH_MEDIUM: "Gemini 3.5 Flash (Medium)",
-  GEMINI_3_5_FLASH_HIGH: "Gemini 3.5 Flash (High)",
-  GEMINI_3_1_PRO_LOW: "Gemini 3.1 Pro (Low)",
-  GEMINI_3_1_PRO_HIGH: "Gemini 3.1 Pro (High)",
-  CLAUDE_SONNET_4_6_THINKING: "Claude Sonnet 4.6 (Thinking)",
-  CLAUDE_OPUS_4_6_THINKING: "Claude Opus 4.6 (Thinking)",
-  GPT_OSS_120B_MEDIUM: "GPT-OSS 120B (Medium)",
+  GEMINI_4_ARGON_LOW: "gemini-4-argon-low",
+  GEMINI_4_ARGON_MEDIUM: "gemini-4-argon-medium",
+  GEMINI_4_ARGON_HIGH: "gemini-4-argon-high",
+  GEMINI_3_8_FLASH_LOW: "gemini-3.8-flash-low",
+  GEMINI_3_8_FLASH_MEDIUM: "gemini-3.8-flash-medium",
+  GEMINI_3_8_FLASH_HIGH: "gemini-3.8-flash-high",
+  CLAUDE_OPUS_5_5_LOW: "claude-opus-5-5-low",
+  CLAUDE_OPUS_5_5_MEDIUM: "claude-opus-5-5-medium",
+  CLAUDE_OPUS_5_5_HIGH: "claude-opus-5-5-high",
+  CLAUDE_SONNET_5_5_LOW: "claude-sonnet-5-5-low",
+  CLAUDE_SONNET_5_5_MEDIUM: "claude-sonnet-5-5-medium",
+  CLAUDE_SONNET_5_5_HIGH: "claude-sonnet-5-5-high",
+  GPT_OSS_120B_MEDIUM: "gpt-oss-120b-medium",
 } as const;
 
-// The model this server documents as its default in tool descriptions, error
-// hints and examples. It is deliberately NOT injected into argv: omitting the
-// `model` argument still defers to the CLI's own default
-// (`model` in ~/.gemini/antigravity-cli/settings.json). It drives the model
-// hints in ERROR_SOLUTIONS; the README "Models" section names it too and must
-// be updated by hand.
-export const DEFAULT_MODEL: string = MODELS.GEMINI_3_7_FLASH_HIGH;
+export const DEFAULT_MODEL: string = MODELS.GEMINI_3_8_FLASH_HIGH;
+export const REVIEW_MODEL: string = MODELS.GEMINI_4_ARGON_HIGH;
 
 // MCP Protocol Constants
 export const PROTOCOL = {
@@ -77,7 +66,7 @@ export const PROTOCOL = {
   KEEPALIVE_INTERVAL: 25000, // 25 seconds
 } as const;
 
-// CLI Constants — verified against `agy --help` (Antigravity CLI v1.1.14)
+// CLI flags used by agy 1.4.9.
 export const CLI = {
   COMMANDS: {
     AGY: "agy",
@@ -102,12 +91,12 @@ export const CLI = {
     SANDBOX: "--sandbox", // run with terminal restrictions
 
     // Diagnostics
-    LOG_FILE: "--log-file", // override CLI log file path (we use this to capture the conversation ID)
+    LOG_FILE: "--log-file", // fallback conversation diagnostics
     HELP: "--help",
     VERSION: "--version",
 
-    // Added in 1.1.x — documented here for reference; no tool wires these up yet.
-    EFFORT: "--effort", // reasoning effort: low | medium | high
+    // Structured input/output and reasoning controls.
+    EFFORT: "--effort", // reasoning effort: low | medium | high | xhigh | max
     OUTPUT_FORMAT: "--output-format", // text | json | stream-json
     INPUT_FORMAT: "--input-format", // text | stream-json
     JSON_SCHEMA: "--json-schema", // enforce structured output
@@ -136,6 +125,9 @@ export const CLI = {
 export interface ToolArguments {
   prompt?: string;
   model?: string;
+  mode?: "read" | "write" | "full";
+  effort?: "low" | "medium" | "high" | "xhigh" | "max";
+  jsonSchema?: string | Record<string, unknown>;
   skipPermissions?: boolean | string; // --dangerously-skip-permissions
   sandbox?: boolean | string; // --sandbox
   cd?: string; // Working directory (alias of workingDir)

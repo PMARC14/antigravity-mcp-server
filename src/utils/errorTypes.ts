@@ -69,13 +69,13 @@ export const ERROR_SOLUTIONS: Record<ErrorCategory, string[]> = {
     'Verify auth works: `agy -p "say OK"`',
   ],
   [ErrorCategory.MODEL]: [
-    "Omit the model parameter to use your Antigravity CLI default",
+    `Omit the model parameter to use ${DEFAULT_MODEL}`,
     `Use an exact id or display label from \`agy models\`, e.g. "${DEFAULT_MODEL}" (run the list-models tool to see the matching id)`,
     "Labels change between CLI releases — re-check after `agy update`",
   ],
   [ErrorCategory.RATE_LIMIT]: [
     "Wait a few minutes before retrying",
-    `Consider using a smaller / faster model (e.g. ${MODELS.GEMINI_3_7_FLASH_LOW})`,
+    `Consider using a smaller / faster model (e.g. ${MODELS.GEMINI_3_8_FLASH_LOW})`,
   ],
   [ErrorCategory.TIMEOUT]: [
     "Increase timeout: `timeout: 600000` (10 minutes)",
@@ -83,8 +83,7 @@ export const ERROR_SOLUTIONS: Record<ErrorCategory, string[]> = {
     "Check network connectivity",
   ],
   [ErrorCategory.PERMISSION]: [
-    "Use `skipPermissions: true` to auto-approve tool calls (use with care)",
-    "Add allow-rules via `/permissions` in interactive agy, or in ~/.gemini/antigravity-cli/settings.json",
+    'Use `mode: "write"` for sandboxed edits and session-only command permissions',
   ],
   [ErrorCategory.NETWORK]: [
     "Check internet connection",

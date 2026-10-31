@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseModelList } from "./modelList.js";
-import { MODELS } from "../constants.js";
+import { MODELS, DEFAULT_MODEL, REVIEW_MODEL } from "../constants.js";
 
 // Verbatim `agy models` output (CLI v1.1.14): tab-separated rows on stdout,
 // preceded by the progress line the CLI emits on stderr.
@@ -61,4 +61,25 @@ test("every label in MODELS is unique and non-empty", () => {
   const labels = Object.values(MODELS);
   assert.ok(labels.every((l) => l.trim().length > 0));
   assert.equal(new Set(labels).size, labels.length);
+});
+
+test("agy 1.4.9 models and defaults match the supplied CLI list", () => {
+  const expected = [
+    "gemini-4-argon-low",
+    "gemini-4-argon-medium",
+    "gemini-4-argon-high",
+    "gemini-3.8-flash-low",
+    "gemini-3.8-flash-medium",
+    "gemini-3.8-flash-high",
+    "claude-opus-5-5-low",
+    "claude-opus-5-5-medium",
+    "claude-opus-5-5-high",
+    "claude-sonnet-5-5-low",
+    "claude-sonnet-5-5-medium",
+    "claude-sonnet-5-5-high",
+    "gpt-oss-120b-medium",
+  ];
+  assert.deepEqual(Object.values(MODELS), expected);
+  assert.equal(DEFAULT_MODEL, "gemini-3.8-flash-high");
+  assert.equal(REVIEW_MODEL, "gemini-4-argon-high");
 });
