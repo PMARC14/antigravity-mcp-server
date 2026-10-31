@@ -91,16 +91,17 @@ export function safeSpawn(exe: string, args: string[], options: SpawnOptions): C
   return spawn(command.exe, command.args, spawnArgs);
 }
 
-export function runCommand(
+/** Raw stdout bytes; callers that need exact content (patches) must not go through a string. */
+export function runCommandBuffer(
   exe: string,
   args: string[],
   cwd?: string,
   timeoutMs = 30000
-): Promise<string> {
+): Promise<Buffer> {
   return new Promise((resolveResult, reject) => {
     const child = safeSpawn(exe, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
     const timer = setTimeout(() => {
       child.kill();
       reject(new Error(`${exe} timed out`));
@@ -109,18 +110,32 @@ export function runCommand(
       clearTimeout(timer);
       reject(error);
     });
-    child.stdout?.on('data', data => {
-      stdout += data;
+    child.stdout?.on('data', (data: Buffer) => {
+      stdout.push(data);
     });
-    child.stderr?.on('data', data => {
-      stderr += data;
+    child.stderr?.on('data', (data: Buffer) => {
+      stderr.push(data);
     });
     child.on('close', code => {
       clearTimeout(timer);
-      if (code === 0) resolveResult(stdout.trimEnd());
-      else reject(new Error(`${exe} exited ${code}: ${stderr || stdout}`));
+      if (code === 0) resolveResult(Buffer.concat(stdout));
+      else
+        reject(
+          new Error(
+            `${exe} exited ${code}: ${Buffer.concat(stderr).toString('utf8') || Buffer.concat(stdout).toString('utf8')}`
+          )
+        );
     });
   });
+}
+
+export async function runCommand(
+  exe: string,
+  args: string[],
+  cwd?: string,
+  timeoutMs = 30000
+): Promise<string> {
+  return (await runCommandBuffer(exe, args, cwd, timeoutMs)).toString('utf8').trimEnd();
 }
 
 export function systemBinary(name: string): string {
@@ -193,11 +208,22 @@ export async function descendants(root: Owner, known: Owner[] = []): Promise<Own
   const raw = await powershell(
     `@(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,@{n='Start';e={[math]::Floor($_.CreationDate.ToUniversalTime().Ticks / 10000).ToString('0')}}) | ConvertTo-Json -Compress`
   );
-  const rows = JSON.parse(raw || '[]') as {
-    ProcessId: number;
-    ParentProcessId: number;
-    Start: string;
-  }[];
+  const rows = JSON.parse(raw || '[]') as ProcessRow[];
+  return snapshotDescendants(rows, root, known);
+}
+
+export interface ProcessRow {
+  ProcessId: number;
+  ParentProcessId: number;
+  Start: string;
+}
+
+/**
+ * Pure tree walk over one process snapshot. An orphan keeps its dead parent's PID, and Windows
+ * may hand that PID to a newer process, so an edge is only trusted when the child did not
+ * start before its parent.
+ */
+export function snapshotDescendants(rows: ProcessRow[], root: Owner, known: Owner[] = []): Owner[] {
   const byPid = new Map(rows.map(row => [row.ProcessId, row]));
   const parents = new Set(
     [root, ...known].filter(p => byPid.get(p.pid)?.Start === p.startTime).map(p => p.pid)
@@ -207,11 +233,11 @@ export async function descendants(root: Owner, known: Owner[] = []): Promise<Own
   while (changed) {
     changed = false;
     for (const row of rows) {
-      if (parents.has(row.ParentProcessId) && !parents.has(row.ProcessId)) {
-        parents.add(row.ProcessId);
-        found.set(row.ProcessId, { pid: row.ProcessId, startTime: row.Start });
-        changed = true;
-      }
+      if (!parents.has(row.ParentProcessId) || parents.has(row.ProcessId)) continue;
+      if (Number(row.Start) < Number(byPid.get(row.ParentProcessId)!.Start)) continue;
+      parents.add(row.ProcessId);
+      found.set(row.ProcessId, { pid: row.ProcessId, startTime: row.Start });
+      changed = true;
     }
   }
   return [...found.values()];
@@ -236,34 +262,61 @@ export async function killTree(root?: Owner, recorded: Owner[] = []): Promise<vo
     return;
   }
   if (!root?.startTime) return;
-  const current = await processStartTime(root.pid);
+  await killProcessGroup(root);
+}
+
+export interface GroupKillDeps {
+  kill(pid: number, signal: NodeJS.Signals | 0): void;
+  startTime(pid: number): Promise<string | undefined>;
+  graceMs: number;
+  killWaitMs: number;
+  pollMs: number;
+}
+
+// Grace plus the post-SIGKILL wait stays inside the 10 second cancel deadline in startProcess.
+const groupKillDeps: GroupKillDeps = {
+  kill: (pid, signal) => process.kill(pid, signal),
+  startTime: processStartTime,
+  graceMs: 5000,
+  killWaitMs: 4000,
+  pollMs: 50,
+};
+
+/** POSIX tree kill by process group, injectable so it is unit-tested on every platform. */
+export async function killProcessGroup(root: Owner, deps = groupKillDeps): Promise<void> {
+  const current = await deps.startTime(root.pid);
   if (current && current !== root.startTime) return;
   try {
-    process.kill(-root.pid, 'SIGTERM');
+    deps.kill(-root.pid, 'SIGTERM');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ESRCH') return;
     throw error;
   }
   const groupAlive = () => {
     try {
-      process.kill(-root.pid, 0);
+      deps.kill(-root.pid, 0);
       return true;
     } catch (error) {
       return (error as NodeJS.ErrnoException).code !== 'ESRCH';
     }
   };
-  const grace = Date.now() + 5000;
-  while (groupAlive() && Date.now() < grace)
-    await new Promise(resolveWait => setTimeout(resolveWait, 50));
-  if (groupAlive()) {
-    const identity = await processStartTime(root.pid);
-    if (identity && identity !== root.startTime) return;
-    try {
-      process.kill(-root.pid, 'SIGKILL');
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
-    }
+  const wait = async (ms: number) => {
+    const limit = Date.now() + ms;
+    while (groupAlive() && Date.now() < limit)
+      await new Promise(resolveWait => setTimeout(resolveWait, deps.pollMs));
+  };
+  await wait(deps.graceMs);
+  if (!groupAlive()) return;
+  const identity = await deps.startTime(root.pid);
+  if (identity && identity !== root.startTime) return;
+  try {
+    deps.kill(-root.pid, 'SIGKILL');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
   }
+  // The root may be gone while a descendant keeps the group alive, so confirm the group itself.
+  await wait(deps.killWaitMs);
+  if (groupAlive()) throw new Error('kill-failed: process group is still alive after SIGKILL');
 }
 
 export interface ProcessOutcome {

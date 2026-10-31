@@ -3,7 +3,14 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Connector, JobEvent, JobLogger, JobMeta, JobSpec, Owner } from './connector.js';
 import { readConfig, type JobsConfig } from './config.js';
-import { JobStore, atomicWrite, sameOwner, terminal, type JobFile } from './store.js';
+import {
+  JobStore,
+  atomicWrite,
+  sameOwner,
+  terminal,
+  type JobFile,
+  type QuotaPause,
+} from './store.js';
 import { withLock } from './lock.js';
 import {
   currentOwner,
@@ -43,12 +50,16 @@ export class JobManager {
   private active = new Map<string, { process: RunningProcess; finished: Promise<void> }>();
   private hold: WakeHold;
   private disposed = false;
+  private readonly kill: typeof killTree;
+  private cleanupTried = new Map<string, number>();
 
   constructor(
     readonly connector: Connector,
     config = readConfig(),
-    private logger = quiet
+    private logger = quiet,
+    deps: { killTree?: typeof killTree } = {}
   ) {
+    this.kill = deps.killTree ?? killTree;
     this.config = config;
     this.store = new JobStore(config.home);
     this.hold = new WakeHold(config.home, logger);
@@ -71,16 +82,7 @@ export class JobManager {
               this.store.write(job);
             }
           } else {
-            await killTree(job.process, job.descendants).catch(error =>
-              this.logger.warn(`Lost job ${job.id} cleanup failed`, error)
-            );
-            this.store.write({
-              ...job,
-              state: 'lost',
-              reserved: false,
-              reason: 'owner_gone',
-              finishedAt: Date.now(),
-            });
+            await this.recoverOrphan(job, Date.now());
           }
         }
         this.store.prune();
@@ -91,6 +93,26 @@ export class JobManager {
       );
       this.timer.unref();
     })());
+  }
+
+  // Must run under the shared lock. The slot and the identities needed to retry the cleanup are
+  // only dropped once the tree is confirmed dead; a later recovery pass retries the same record.
+  private async recoverOrphan(job: JobMeta, now: number): Promise<void> {
+    if (job.state === 'lost' && now - (this.cleanupTried.get(job.id) ?? 0) < 2000) return;
+    this.cleanupTried.set(job.id, now);
+    let confirmed = true;
+    await this.kill(job.process, job.descendants).catch(error => {
+      confirmed = false;
+      this.logger.warn(`Lost job ${job.id} cleanup failed; keeping its slot`, error);
+    });
+    this.store.write({
+      ...job,
+      state: 'lost',
+      reserved: !confirmed,
+      reason: 'owner_gone',
+      finishedAt: job.finishedAt ?? now,
+    });
+    if (confirmed) this.cleanupTried.delete(job.id);
   }
 
   private owns(job: JobMeta): boolean {
@@ -224,27 +246,15 @@ export class JobManager {
               }
               continue;
             }
-            await killTree(job.process, job.descendants).catch(error =>
-              this.logger.warn(`Lost job ${job.id} cleanup failed`, error)
-            );
-            Object.assign(job, {
-              state: 'lost',
-              reserved: false,
-              reason: 'owner_gone',
-              finishedAt: now,
-            });
-            this.store.write(job);
+            await this.recoverOrphan(job, now);
           }
         }
-        // Pauses are records in the common store, including after a restart.
+        // Pauses live in their own per-connector (and per-model) state, so handing a paused job
+        // to another connector cannot lift them. Expired ones are dropped here.
         const requeued = new Set(jobs.map(job => job.requeuedFrom).filter(Boolean));
-        const pauses = jobs.filter(
-          job =>
-            job.state === 'paused' &&
-            !job.pauseCleared &&
-            !requeued.has(job.id) &&
-            (!job.resetAt || job.resetAt > now)
-        );
+        const saved = this.store.pauses();
+        const pauses = saved.filter(pause => !pause.resetAt || pause.resetAt > now);
+        if (pauses.length !== saved.length) this.store.writePauses(pauses);
         let slots = jobs.filter(job => job.state === 'running' || job.reserved).length;
         for (const job of jobs.reverse()) {
           if (job.connector !== this.connector.id || terminal(job)) continue;
@@ -281,15 +291,14 @@ export class JobManager {
             !job.manualRequeue &&
             pauses.find(
               p =>
-                p.connector === job.connector &&
-                (!p.pauseModel || !job.model || p.pauseModel === job.model)
+                p.connector === job.connector && (!p.model || !job.model || p.model === job.model)
             );
           if (pause) {
             Object.assign(job, {
               state: 'paused',
               reason: 'usage_limit',
               resetAt: pause.resetAt,
-              pauseModel: pause.pauseModel,
+              pauseModel: pause.model,
             });
             this.store.save(job, this.owner);
             continue;
@@ -445,14 +454,43 @@ export class JobManager {
       job.reason = 'usage_limit';
       job.resetAt = event.usageLimit.resetAt;
       job.pauseModel = event.usageLimit.model;
+      await this.recordQuota(job, event.usageLimit);
     } else if (outcome.kind === 'error' || outcome.code !== 0 || event.error) {
       job.state = 'failed';
       job.reason = outcome.kind === 'error' ? 'spawn_error' : 'cli_error';
     } else {
       job.state = 'completed';
       job.reason = undefined;
+      await this.recordQuota(job);
     }
     this.store.save(job, this.owner);
+  }
+
+  // A usage limit adds or extends the connector's pause (no reset time means until lifted). A
+  // job that started after the pause and completed proves the quota is back, which lifts it.
+  private recordQuota(job: JobMeta, limit?: { resetAt?: number; model?: string }): Promise<void> {
+    return withLock(this.config.home, () => {
+      const matches = (pause: QuotaPause, model?: string) =>
+        pause.connector === job.connector && pause.model === model;
+      let pauses = this.store.pauses();
+      if (limit) {
+        const existing = pauses.find(pause => matches(pause, limit.model));
+        const resetAt =
+          existing && (!existing.resetAt || !limit.resetAt)
+            ? undefined
+            : Math.max(existing?.resetAt ?? 0, limit.resetAt ?? 0) || undefined;
+        pauses = pauses.filter(pause => pause !== existing);
+        pauses.push({ connector: job.connector, model: limit.model, resetAt, since: Date.now() });
+      } else {
+        pauses = pauses.filter(
+          pause =>
+            pause.connector !== job.connector ||
+            (pause.model !== undefined && pause.model !== job.model) ||
+            pause.since > (job.startedAt ?? 0)
+        );
+      }
+      this.store.writePauses(pauses);
+    });
   }
 
   async list(limit = 50) {
@@ -568,68 +606,94 @@ export class JobManager {
 
   async requeue(jobId: string, model?: string, agent = this.connector.id) {
     await this.initialize();
-    const original = this.store.get(jobId);
-    if (!['paused', 'lost', 'failed'].includes(original.state))
-      throw new Error('Only paused, lost or failed jobs can be requeued');
-    if (original.reserved)
-      throw new Error(
-        'The process is still alive after kill-failed; cancel it from its owner before requeueing'
-      );
+    // The slow availability check stays outside the lock; the record is read again inside it.
     if (agent === this.connector.id) await this.available();
-    const id = randomUUID();
-    const meta: JobMeta = {
-      ...original,
-      id,
-      connector: agent,
-      model:
-        agent === this.connector.id
-          ? this.selectModel(model ?? (agent === original.connector ? original.model : undefined))
-          : (model ?? (agent === original.connector ? original.model : undefined)),
-      state: 'queued',
-      owner: agent === this.connector.id ? this.owner : undefined,
-      managerId: agent === this.connector.id ? this.id : undefined,
-      process: undefined,
-      descendants: undefined,
-      reserved: false,
-      sessionId: undefined,
-      reason: undefined,
-      error: undefined,
-      resetAt: undefined,
-      pauseModel: undefined,
-      exitCode: undefined,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      startedAt: undefined,
-      finishedAt: undefined,
-      finalPath: this.store.path(id, 'final'),
-    };
-    meta.pauseCleared = false;
-    meta.manualRequeue = true;
-    meta.requeuedFrom = original.id;
-    if (meta.worktree?.removed)
-      throw new Error('The worktree was removed; start a new job with the saved prompt');
-    this.store.create(meta, this.store.read(jobId, 'prompt'));
-    if (this.owns(original) && original.state === 'paused') {
-      await withLock(this.config.home, () => {
+    const result = await withLock(this.config.home, () => {
+      const original = this.store.get(jobId);
+      if (!['paused', 'lost', 'failed'].includes(original.state))
+        throw new Error('Only paused, lost or failed jobs can be requeued');
+      if (original.reserved)
+        throw new Error(
+          'The process is still alive after kill-failed or owner loss; wait until cleanup is confirmed before requeueing'
+        );
+      if (original.worktree?.removed)
+        throw new Error('The worktree was removed; start a new job with the saved prompt');
+      const id = randomUUID();
+      const meta: JobMeta = {
+        ...original,
+        id,
+        connector: agent,
+        model:
+          agent === this.connector.id
+            ? this.selectModel(model ?? (agent === original.connector ? original.model : undefined))
+            : (model ?? (agent === original.connector ? original.model : undefined)),
+        state: 'queued',
+        owner: agent === this.connector.id ? this.owner : undefined,
+        managerId: agent === this.connector.id ? this.id : undefined,
+        process: undefined,
+        descendants: undefined,
+        reserved: false,
+        sessionId: undefined,
+        reason: undefined,
+        error: undefined,
+        resetAt: undefined,
+        pauseModel: undefined,
+        exitCode: undefined,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        startedAt: undefined,
+        finishedAt: undefined,
+        finalPath: this.store.path(id, 'final'),
+      };
+      meta.pauseCleared = false;
+      meta.manualRequeue = true;
+      meta.requeuedFrom = original.id;
+      this.store.create(meta, this.store.read(jobId, 'prompt'));
+      // Publishing the replacement and suppressing the original's retry are one critical section.
+      if (original.state === 'paused') {
         original.pauseCleared = true;
-        this.store.save(original, this.owner);
-      });
-    }
+        this.store.write(original);
+      }
+      return { jobId: id, state: meta.state };
+    });
     void this.pump().catch(error => this.logger.warn('Job queue error', error));
-    return { jobId: id, state: meta.state };
+    return result;
   }
 
+  // The whole collect runs under the shared lock. That is the reservation: promotion, requeue and
+  // other collects cannot start a job in this worktree while it is saved and possibly removed.
+  // Trade-off: the git calls (30s timeout each) stall both forks' queues while they run.
   async collect(jobId: string, remove: 'none' | 'worktree' | 'worktree+branch' = 'none') {
     await this.initialize();
-    const job = this.store.get(jobId);
-    if (!job.worktree) throw new Error('This job has no worktree');
-    if (job.state === 'running' || job.reserved || job.state === 'queued')
-      throw new Error('Wait for the job to stop before collecting its worktree');
-    if (!this.owns(job))
-      throw new Error('Only the owning server can collect this job; requeue a lost job first');
-    const result = await collectWorktree(job.worktree, this.store.path(jobId, 'patch'), remove);
-    this.store.save(job, this.owner);
-    return result;
+    return withLock(this.config.home, async () => {
+      const job = this.store.get(jobId);
+      if (!job.worktree) throw new Error('This job has no worktree');
+      if (job.state === 'running' || job.reserved || job.state === 'queued')
+        throw new Error('Wait for the job to stop before collecting its worktree');
+      if (!this.owns(job))
+        throw new Error('Only the owning server can collect this job; requeue a lost job first');
+      // Requeue copies the worktree reference, so every job that points at it must be idle.
+      // A paused job that was requeued will never resume and does not count.
+      const sharing = this.store
+        .list()
+        .filter(other => other.id !== job.id && other.worktree?.path === job.worktree!.path);
+      const busy = sharing.find(
+        other =>
+          other.reserved || (!terminal(other) && !(other.state === 'paused' && other.pauseCleared))
+      );
+      if (busy)
+        throw new Error(`Job ${busy.id} still uses this worktree; wait for it to stop first`);
+      const result = await collectWorktree(job.worktree, this.store.path(jobId, 'patch'), remove);
+      if (job.worktree.removed && job.state === 'paused') job.pauseCleared = true;
+      this.store.save(job, this.owner);
+      if (job.worktree.removed)
+        for (const other of sharing) {
+          if (!other.worktree) continue;
+          other.worktree.removed = true;
+          this.store.write(other);
+        }
+      return result;
+    });
   }
 
   async dispose(): Promise<void> {

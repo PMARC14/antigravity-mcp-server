@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fixture, fakeConnector, meta, until } from './test-helpers.js';
 import { JobManager } from './manager.js';
 import { JobStore } from './store.js';
-import { currentOwner, isAlive } from './proc.js';
+import { currentOwner, isAlive, runCommand } from './proc.js';
+import { createWorktree } from './worktree.js';
 
 test('two managers own their jobs exclusively and share the machine limit across connectors', async () => {
   const f = fixture();
@@ -243,6 +244,167 @@ test('unavailable or disabled CLI fails start immediately with an install hint',
   try {
     await assert.rejects(() => manager.start({ prompt: 'p', cwd: f.home }), /Install/);
     assert.equal(manager.store.list().length, 0);
+  } finally {
+    await manager.dispose();
+    f.cleanup();
+  }
+});
+
+test('failed orphan cleanup keeps the slot and cleanup identities until termination is confirmed', async () => {
+  const f = fixture();
+  const store = new JobStore(f.home);
+  const dead = { ...(await currentOwner()), startTime: 'reused-pid' };
+  const root = { pid: 424242, startTime: '1' };
+  const child = { pid: 424243, startTime: '2' };
+  store.create(
+    meta(f.home, {
+      id: 'orphan',
+      state: 'running',
+      reserved: true,
+      owner: dead,
+      process: root,
+      descendants: [child],
+    }),
+    'p'
+  );
+  let terminated = false;
+  const attempts: unknown[] = [];
+  const manager = new JobManager(fakeConnector(f.script), f.config, undefined, {
+    async killTree(rootIdentity, children) {
+      attempts.push([rootIdentity, children]);
+      if (!terminated) throw new Error('kill-failed: processes in the tree are still alive');
+    },
+  });
+  try {
+    await manager.initialize();
+    const orphan = store.get('orphan');
+    assert.equal(orphan.state, 'lost');
+    assert.equal(orphan.reserved, true);
+    assert.deepEqual(orphan.process, root);
+    assert.deepEqual(orphan.descendants, [child]);
+    await assert.rejects(() => manager.requeue('orphan'), /still alive/);
+    const next = await manager.start({ prompt: 'next', cwd: f.home });
+    await new Promise(resolveWait => setTimeout(resolveWait, 1500));
+    assert.equal(
+      store.get(next.jobId).state,
+      'queued',
+      'the orphan still counts against the limit'
+    );
+    terminated = true;
+    await until(() => store.get('orphan').reserved === false, 'cleanup retried');
+    assert.deepEqual(attempts.at(-1), [root, [child]]);
+    assert.equal((await manager.result(next.jobId, 10)).state, 'completed');
+  } finally {
+    await manager.dispose();
+    f.cleanup();
+  }
+});
+
+test('requeue revalidates the original under the lock and cannot clobber a job promoted meanwhile', async () => {
+  const f = fixture();
+  const connector = fakeConnector(f.script, 'codex', Date.now() + 60000);
+  const manager = new JobManager(connector, f.config);
+  try {
+    const one = await manager.start({ prompt: JSON.stringify({ limit: true }), cwd: f.home });
+    await until(() => manager.store.get(one.jobId).state === 'paused', 'usage pause');
+    const before = manager.store.list().length;
+    const detect = connector.detect.bind(connector);
+    connector.detect = async () => {
+      // Reset-time promotion wins the race while requeue awaits availability.
+      connector.detect = detect;
+      manager.store.write({ ...manager.store.get(one.jobId), state: 'running', reserved: true });
+      return detect();
+    };
+    await assert.rejects(() => manager.requeue(one.jobId), /Only paused/);
+    assert.equal(manager.store.list().length, before, 'no replacement job is created');
+    const original = manager.store.get(one.jobId);
+    assert.equal(original.state, 'running');
+    assert.equal(original.reserved, true);
+    assert.notEqual(original.pauseCleared, true);
+  } finally {
+    await manager.dispose();
+    f.cleanup();
+  }
+});
+
+test('handing the only paused job to another connector does not lift the quota pause', async () => {
+  const f = fixture();
+  const manager = new JobManager(fakeConnector(f.script, 'codex', Date.now() + 60000), f.config);
+  try {
+    const one = await manager.start({ prompt: JSON.stringify({ limit: true }), cwd: f.home });
+    await until(() => manager.store.get(one.jobId).state === 'paused', 'usage pause');
+    const handed = await manager.requeue(one.jobId, undefined, 'agy');
+    assert.equal(manager.store.get(handed.jobId).connector, 'agy');
+    const two = await manager.start({ prompt: 'second', cwd: f.home });
+    await until(() => manager.store.get(two.jobId).state === 'paused', 'new job pauses', 8000);
+    assert.equal(manager.store.get(two.jobId).reason, 'usage_limit');
+  } finally {
+    await manager.dispose();
+    f.cleanup();
+  }
+});
+
+test('a manual requeue on the same connector bypasses the pause, and its success lifts it', async () => {
+  const f = fixture();
+  const manager = new JobManager(fakeConnector(f.script, 'codex', Date.now() + 60000), f.config);
+  try {
+    const one = await manager.start({
+      prompt: JSON.stringify({ limit: true, once: join(f.home, 'limited') }),
+      cwd: f.home,
+    });
+    await until(() => manager.store.get(one.jobId).state === 'paused', 'usage pause');
+    const again = await manager.requeue(one.jobId);
+    assert.equal((await manager.result(again.jobId, 10)).state, 'completed');
+    await until(() => manager.store.pauses().length === 0, 'pause lifted by the success');
+    const next = await manager.start({ prompt: 'after', cwd: f.home });
+    assert.equal((await manager.result(next.jobId, 10)).state, 'completed');
+  } finally {
+    await manager.dispose();
+    f.cleanup();
+  }
+});
+
+test('collect refuses to remove a worktree that a requeued replacement still uses', async () => {
+  const f = fixture();
+  const manager = new JobManager(fakeConnector(f.script), f.config);
+  try {
+    await manager.initialize();
+    const root = join(f.home, 'repo');
+    mkdirSync(root);
+    const git = (...args: string[]) => runCommand('git', args, root);
+    await git('init');
+    await git('config', 'user.email', 'agent-jobs-test@example.invalid');
+    await git('config', 'user.name', 'Agent jobs tests');
+    await git('config', 'commit.gpgsign', 'false');
+    writeFileSync(join(root, 'tracked.txt'), 'base\n');
+    await git('add', '-A');
+    await git('commit', '-m', 'base');
+    const worktree = await createWorktree(root, 'shared', 'shared-wt', 'codex');
+    const mine = {
+      owner: await currentOwner(),
+      managerId: (manager as unknown as { id: string }).id,
+    };
+    const store = manager.store;
+    store.create(meta(f.home, { id: 'orig', state: 'failed', worktree, ...mine }), 'p');
+    store.create(
+      meta(f.home, {
+        id: 'repl',
+        state: 'running',
+        reserved: true,
+        requeuedFrom: 'orig',
+        worktree,
+        ...mine,
+      }),
+      'p'
+    );
+    await assert.rejects(() => manager.collect('orig', 'worktree'), /still uses this worktree/);
+    assert.equal(existsSync(worktree.path), true);
+    assert.notEqual(store.get('orig').worktree?.removed, true);
+    store.write({ ...store.get('repl'), state: 'completed', reserved: false });
+    const result = await manager.collect('orig', 'worktree');
+    assert.equal(result.removed, true);
+    assert.equal(existsSync(worktree.path), false);
+    assert.equal(store.get('repl').worktree?.removed, true, 'every job sharing it is updated');
   } finally {
     await manager.dispose();
     f.cleanup();
