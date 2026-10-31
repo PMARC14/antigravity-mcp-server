@@ -34,18 +34,28 @@ import {
 import { getCompletionValues } from "./utils/completions.js";
 import { SERVER_VERSION } from "./version.js";
 
+import {
+  startChannelNotifier,
+  withChannelCapabilities,
+  withChannelInstructions,
+} from "./jobs/channel.js";
+
+const CHANNEL_INSTRUCTIONS = withChannelInstructions(undefined, "agy");
+let stopChannel = () => {};
+
 const server = new Server(
   {
     name: "antigravity-mcp",
     version: SERVER_VERSION,
   },
   {
-    capabilities: {
+    capabilities: withChannelCapabilities({
       tools: {},
       prompts: {},
       logging: {},
       completions: {},
-    },
+    }),
+    ...(CHANNEL_INSTRUCTIONS ? { instructions: CHANNEL_INSTRUCTIONS } : {}),
   },
 );
 
@@ -259,7 +269,9 @@ async function main() {
   await agyJobManager.initialize();
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  stopChannel = startChannelNotifier(agyJobManager, server, "agy", Logger);
   server.onclose = () => {
+    stopChannel();
     void agyJobManager.dispose();
   };
   Logger.debug("antigravity-mcp-server listening on stdio");
@@ -267,6 +279,7 @@ async function main() {
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
+    stopChannel();
     void agyJobManager.dispose().finally(() => process.exit(0));
   });
 }
