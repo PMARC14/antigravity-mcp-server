@@ -16,6 +16,17 @@ import {
   listModelsTool,
 } from "./simple-tools.js";
 import { metricsTool } from "./metrics.tool.js";
+import { agyUsageTool } from "./agy-usage.tool.js";
+import { AgyConnector } from "../connectors/agy.js";
+import { JobManager } from "../jobs/manager.js";
+import { registerJobTools } from "../jobs/tools.js";
+import { Logger } from "../utils/logger.js";
+
+export const agyJobManager = new JobManager(
+  new AgyConnector(),
+  undefined,
+  Logger,
+);
 
 toolRegistry.push(
   askAgyTool,

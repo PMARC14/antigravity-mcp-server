@@ -29,6 +29,7 @@ import {
   executeTool,
   toolExists,
   getPromptMessage,
+  agyJobManager,
 } from "./tools/index.js";
 import { getCompletionValues } from "./utils/completions.js";
 import { SERVER_VERSION } from "./version.js";
@@ -255,9 +256,19 @@ server.setRequestHandler(
 
 async function main() {
   Logger.debug("init antigravity-mcp-server");
+  await agyJobManager.initialize();
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  server.onclose = () => {
+    void agyJobManager.dispose();
+  };
   Logger.debug("antigravity-mcp-server listening on stdio");
+}
+
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.once(signal, () => {
+    void agyJobManager.dispose().finally(() => process.exit(0));
+  });
 }
 
 main().catch((error) => {

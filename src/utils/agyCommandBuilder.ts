@@ -72,6 +72,14 @@ export class AgyCommandBuilder {
     prompt: string,
     options: AgyCommandBuilderOptions = {},
   ): Promise<BuildResult> {
+    return this.buildSync(prompt, options);
+  }
+
+  /** Synchronous form for callers (job connector) that cannot await. */
+  buildSync(
+    prompt: string,
+    options: AgyCommandBuilderOptions = {},
+  ): BuildResult {
     if (options.conversationId && options.continueLatest) {
       throw new Error(
         "Cannot combine conversationId (--conversation) with continueLatest (--continue).",
