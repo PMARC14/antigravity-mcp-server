@@ -8,10 +8,18 @@ for (const mode of ["read", "write", "full"] as const) {
   test(`builds ${mode} mode with one NDJSON prompt on stdin`, async () => {
     const prompt = 'quoted "prompt"\nUnicode: ☃; ` $() &';
     const result = await builder.build(prompt, { mode });
-    assert.equal(
-      result.stdin,
-      JSON.stringify({ event: "user", message: { content: prompt } }) + "\n",
-    );
+    const first =
+      JSON.stringify({ event: "user", message: { content: prompt } }) + "\n";
+    if (mode === "read") {
+      // Plan mode ends a headless run after its planning turn, so read mode
+      // sends a second turn asking for the full answer.
+      const lines = result.stdin.trimEnd().split("\n");
+      assert.equal(lines.length, 2);
+      assert.equal(lines[0] + "\n", first);
+      assert.match(JSON.parse(lines[1]).message.content, /complete final answer/);
+    } else {
+      assert.equal(result.stdin, first);
+    }
     assert.ok(!result.args.includes(prompt));
     assert.ok(!result.args.includes("-p"));
     assert.ok(!result.args.includes("--print-timeout"));
@@ -44,7 +52,7 @@ for (const mode of ["read", "write", "full"] as const) {
 test("long prompts use the same stdin transport", async () => {
   const prompt = "x".repeat(150000);
   const result = await builder.build(prompt);
-  assert.equal(JSON.parse(result.stdin).message.content, prompt);
+  assert.equal(JSON.parse(result.stdin.split("\n")[0]).message.content, prompt);
   assert.ok(!result.args.some((arg) => arg.includes(prompt)));
 });
 
@@ -86,7 +94,7 @@ test("effort, JSON schema and workspace arguments stay separate", async () => {
     concisePrompt: true,
   });
   assert.ok(result.args.includes(schema));
-  assert.equal(JSON.parse(result.stdin).message.content, result.finalPrompt);
+  assert.equal(JSON.parse(result.stdin.split("\n")[0]).message.content, result.finalPrompt);
 });
 
 test("legacy permission switches map onto safe modes", () => {

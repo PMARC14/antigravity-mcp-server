@@ -70,6 +70,23 @@ export function resolveAgyMode(
   return mode;
 }
 
+/** The follow-up turn read mode sends after the prompt (see stdinTurns). */
+export const READ_FINAL_TURN =
+  "Now give your complete final answer to the task above, in full. Do not ask for approval and do not modify anything.";
+
+/**
+ * The NDJSON turns sent on stdin, one per line.
+ *
+ * Read mode is agy's `--mode plan`, which ends a headless run after its
+ * planning turn ("I'll inspect the repository…"), so it sends a second turn
+ * asking for the answer itself; the last result wins.
+ */
+function stdinTurns(prompt: string, mode: AgyMode): string {
+  const turn = (content: string) =>
+    JSON.stringify({ event: "user", message: { content } }) + "\n";
+  return mode === "read" ? turn(prompt) + turn(READ_FINAL_TURN) : turn(prompt);
+}
+
 export class AgyCommandBuilder {
   async build(
     prompt: string,
@@ -140,9 +157,7 @@ export class AgyCommandBuilder {
         prompt,
       }),
       logFile,
-      stdin:
-        JSON.stringify({ event: "user", message: { content: finalPrompt } }) +
-        "\n",
+      stdin: stdinTurns(finalPrompt, mode),
     };
   }
 
