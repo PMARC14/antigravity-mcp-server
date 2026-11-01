@@ -8,10 +8,10 @@ import {
 
 export const executionFields = {
   mode: z
-    .enum(["read", "write", "full"])
+    .enum(["read", "write", "trusted", "full"])
     .optional()
     .describe(
-      "Permission mode. Read tools default to read; bg, delegate and batch default to write. Full requires an explicit request.",
+      "Permission mode. Read tools default to read; bg, delegate and batch default to write. Trusted edits and runs commands without agy's sandbox (needed for Git Bash or npm tests on Windows), for the user's own repos. Full requires an explicit request.",
     ),
   effort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
   jsonSchema: z

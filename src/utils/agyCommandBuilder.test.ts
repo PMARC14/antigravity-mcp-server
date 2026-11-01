@@ -111,3 +111,14 @@ for (const options of [
     await assert.rejects(builder.build("hi", options), /conflicts/);
   });
 }
+
+test("trusted mode edits and runs commands without agy's sandbox (Git Bash breaks under it)", () => {
+  const result = new AgyCommandBuilder().buildSync("run the tests", { mode: "trusted" });
+  assert.ok(result.args.includes("accept-edits"));
+  assert.equal(result.args.includes("--sandbox"), false);
+  assert.equal(result.args.includes("--dangerously-skip-permissions"), false);
+  const settings = result.args[result.args.indexOf("--settings") + 1];
+  assert.deepEqual(JSON.parse(settings), { permissions: { allow: ["command(*)"] } });
+  assert.equal(resolveAgyMode({ mode: "trusted", skipPermissions: false }), "trusted");
+  assert.throws(() => resolveAgyMode({ mode: "trusted", skipPermissions: true }), /conflicts/);
+});

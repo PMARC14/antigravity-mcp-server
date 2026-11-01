@@ -5,7 +5,10 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { randomBytes } from "crypto";
 
-export type AgyMode = "read" | "write" | "full";
+// trusted: accept-edits plus the session-only command allow rule, without
+// --sandbox. agy's sandbox breaks Git Bash/MSYS2 on Windows, so jobs that run
+// bash or npm tests need it. full also skips every permission check.
+export type AgyMode = "read" | "write" | "trusted" | "full";
 export type AgyEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
 /** Options verified against the agy 1.4.9 spike. */
@@ -50,8 +53,8 @@ export function resolveAgyMode(
           ? "write"
           : "read"
         : defaultMode);
-  if (!["read", "write", "full"].includes(mode)) {
-    throw new Error(`Invalid mode: ${mode}. Expected read, write or full.`);
+  if (!["read", "write", "trusted", "full"].includes(mode)) {
+    throw new Error(`Invalid mode: ${mode}. Expected read, write, trusted or full.`);
   }
   if (
     options.skipPermissions !== undefined &&
@@ -89,11 +92,10 @@ export class AgyCommandBuilder {
     const args = [CLI.FLAGS.MODEL, options.model ?? DEFAULT_MODEL];
     if (mode === "full") {
       args.push(CLI.FLAGS.SKIP_PERMISSIONS);
-    } else if (mode === "write") {
+    } else if (mode === "write" || mode === "trusted") {
+      args.push(CLI.FLAGS.MODE, "accept-edits");
+      if (mode === "write") args.push(CLI.FLAGS.SANDBOX);
       args.push(
-        CLI.FLAGS.MODE,
-        "accept-edits",
-        CLI.FLAGS.SANDBOX,
         "--settings",
         JSON.stringify({ permissions: { allow: ["command(*)"] } }),
       );
