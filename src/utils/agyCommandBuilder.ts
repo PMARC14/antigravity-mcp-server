@@ -70,6 +70,23 @@ export function resolveAgyMode(
   return mode;
 }
 
+/** Read-only commands a read-mode run may use without a prompt. */
+export const READ_ONLY_COMMANDS = [
+  "command(git status*)",
+  "command(git diff*)",
+  "command(git log*)",
+  "command(git show*)",
+  "command(rg *)",
+  "command(Get-ChildItem*)",
+  "command(Get-Content*)",
+  "command(ls*)",
+  "command(cat *)",
+];
+
+/** Steers read-mode runs away from shell commands, which can abort the run. */
+export const READ_PREFIX =
+  "This is a read-only task: everything you need is in this message. Use file-reading tools if you must; avoid shell commands.\n\n";
+
 /** The follow-up turn read mode sends after the prompt (see stdinTurns). */
 export const READ_FINAL_TURN =
   "Now give your complete final answer to the task above, in full. Do not ask for approval and do not modify anything.";
@@ -84,7 +101,9 @@ export const READ_FINAL_TURN =
 function stdinTurns(prompt: string, mode: AgyMode): string {
   const turn = (content: string) =>
     JSON.stringify({ event: "user", message: { content } }) + "\n";
-  return mode === "read" ? turn(prompt) + turn(READ_FINAL_TURN) : turn(prompt);
+  return mode === "read"
+    ? turn(READ_PREFIX + prompt) + turn(READ_FINAL_TURN)
+    : turn(prompt);
 }
 
 export class AgyCommandBuilder {
@@ -117,7 +136,14 @@ export class AgyCommandBuilder {
         JSON.stringify({ permissions: { allow: ["command(*)"] } }),
       );
     } else {
-      args.push(CLI.FLAGS.MODE, "plan");
+      // A denied command aborts a headless run with no output, so plan mode
+      // gets a session-only allow rule for read-only commands. Nothing broader.
+      args.push(
+        CLI.FLAGS.MODE,
+        "plan",
+        "--settings",
+        JSON.stringify({ permissions: { allow: READ_ONLY_COMMANDS } }),
+      );
     }
     if (options.effort) args.push(CLI.FLAGS.EFFORT, options.effort);
     if (options.jsonSchema !== undefined) {

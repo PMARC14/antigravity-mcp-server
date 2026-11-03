@@ -15,8 +15,15 @@ for (const mode of ["read", "write", "full"] as const) {
       // sends a second turn asking for the full answer.
       const lines = result.stdin.trimEnd().split("\n");
       assert.equal(lines.length, 2);
-      assert.equal(lines[0] + "\n", first);
+      // A denied command aborts a headless run, so the first turn says the
+      // content is provided, and read-only commands get a session allow rule.
+      const firstTurn = JSON.parse(lines[0]).message.content;
+      assert.match(firstTurn, /^This is a read-only task/);
+      assert.ok(firstTurn.endsWith(prompt));
       assert.match(JSON.parse(lines[1]).message.content, /complete final answer/);
+      const settings = JSON.parse(result.args[result.args.indexOf("--settings") + 1]);
+      assert.ok(settings.permissions.allow.includes("command(git diff*)"));
+      assert.ok(!settings.permissions.allow.includes("command(*)"));
     } else {
       assert.equal(result.stdin, first);
     }
@@ -52,7 +59,7 @@ for (const mode of ["read", "write", "full"] as const) {
 test("long prompts use the same stdin transport", async () => {
   const prompt = "x".repeat(150000);
   const result = await builder.build(prompt);
-  assert.equal(JSON.parse(result.stdin.split("\n")[0]).message.content, prompt);
+  assert.ok(JSON.parse(result.stdin.split("\n")[0]).message.content.endsWith(prompt));
   assert.ok(!result.args.some((arg) => arg.includes(prompt)));
 });
 
@@ -94,7 +101,7 @@ test("effort, JSON schema and workspace arguments stay separate", async () => {
     concisePrompt: true,
   });
   assert.ok(result.args.includes(schema));
-  assert.equal(JSON.parse(result.stdin.split("\n")[0]).message.content, result.finalPrompt);
+  assert.ok(JSON.parse(result.stdin.split("\n")[0]).message.content.endsWith(result.finalPrompt));
 });
 
 test("legacy permission switches map onto safe modes", () => {

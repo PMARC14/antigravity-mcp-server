@@ -55,10 +55,8 @@ test("read mode uses plan, stdin NDJSON and the default model", () => {
   assert.equal(args.includes(spec.prompt), false);
   assert.equal(args.includes("-p"), false);
   const turns = stdin.trim().split("\n").map((line) => JSON.parse(line));
-  assert.deepEqual(turns[0], {
-    event: "user",
-    message: { content: spec.prompt },
-  });
+  assert.equal(turns[0].event, "user");
+  assert.ok(turns[0].message.content.endsWith(spec.prompt));
   // Plan mode stops after its planning turn; the second turn asks for the answer.
   assert.ok(stdin.endsWith("\n") && turns.length === 2);
   assert.match(turns[1].message.content, /complete final answer/);
@@ -110,7 +108,7 @@ test("a slash-command looking prompt still travels on stdin, never argv", () => 
   const { args, stdin } = connector.build({ ...spec, prompt: "/usage" });
   assert.equal(args.includes("/usage"), false);
   assert.equal(args.includes("-p"), false);
-  assert.equal(JSON.parse(stdin.split("\n")[0]).message.content, "/usage");
+  assert.ok(JSON.parse(stdin.split("\n")[0]).message.content.endsWith("/usage"));
 });
 
 test("parses the real write-run fixture", () => {
