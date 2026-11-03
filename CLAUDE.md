@@ -1,41 +1,41 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working in this repository.
 
 ## Project Overview
 
-MCP server that bridges MCP clients to the Google Antigravity CLI (`agy`). Ported from `kimi-mcp-server` (same architecture, adapted to agy's much smaller flag surface). All agy execution goes through print mode (`-p`).
+MCP server connecting clients to Google Antigravity CLI (`agy` 1.4.x). It provides synchronous tools, legacy background/delegation tools, and shared background jobs.
 
 ## Commands
 
 ```bash
-pnpm build          # tsc → dist/
-pnpm lint           # tsc --noEmit
-pnpm test           # build + node --test on dist/**/*.test.js
+npm run build       # tsc -> dist/
+npm run lint        # tsc --noEmit
+npm test            # build, then node --test on dist/**/*.test.js
 ```
 
 ## Architecture
 
-- `src/index.ts` — MCP server entry (stdio transport). Handles tools, prompts, completions, logging, and keepalive progress notifications (25s interval) for long agy runs.
-- `src/tools/registry.ts` — `UnifiedTool` interface + registry; tools are zod-schema'd, converted to JSON Schema via `zod-to-json-schema`.
-- `src/tools/*.tool.ts` — individual tools; registered in `src/tools/index.ts`.
-- `src/utils/agyCommandBuilder.ts` — builds argv for `agy`. Always appends `--log-file <tmp>` (see below) and `-p <prompt>` last. Prompts >100KB go via stdin (bare `-p`).
-- `src/utils/agyExecutor.ts` — spawns agy, classifies errors, parses the conversation ID.
-- `src/utils/sessionStorage.ts` — in-memory sessions keyed by workspace hash; maps internal `sessionId` → native agy conversation UUID. `withSessionLock` serializes concurrent calls sharing a sessionId.
-- `src/utils/bgTaskManager.ts` — detached background agy processes. State in `~/.agy-mcp/bg/`: `<id>.json` (meta), `<id>.log` (merged stdout/stderr), `<id>.agylog` (agy's own `--log-file`, conversation-ID source). Bg tasks default to `--dangerously-skip-permissions`.
-- `delegate-antigravity` builds on bgTaskManager: git worktree under `~/.agy-mcp/delegations/`, branch `agy/<rand>`, collect returns the diff vs base.
+- `src/index.ts` — MCP server entry, stdio transport and progress notifications.
+- `src/tools/registry.ts` and `src/tools/index.ts` — tool interface and registration; individual tool schemas are in `src/tools/`.
+- `src/utils/agyCommandBuilder.ts` — builds argv and stdin for agy. Prompts are NDJSON user events on stdin with `--input-format stream-json --output-format stream-json`. Read mode sends two turns.
+- `src/utils/agyExecutor.ts` and `src/connectors/agy.ts` — parse stream-json events: conversation IDs come from `init` or `result`, final text from `result.response`. The executor can fall back to the CLI log for the ID.
+- `src/utils/sessionStorage.ts` — in-memory sessions and per-session locking.
+- `src/utils/bgTaskManager.ts` — legacy background tasks stored in `~/.agy-mcp/bg/`; `delegate-antigravity` uses worktrees.
+- `src/jobs/` — shared jobs module, synced from the Codex fork, which is its source of truth. Do not edit it here; `scripts/sync-jobs.sh` copies it and `src/jobs/sync.test.ts` checks synchronization.
 
-## Key agy CLI facts (v1.1.14)
+## Modes and CLI behavior
 
-- Print mode: `agy -p "<prompt>"`, or bare `-p` with prompt on stdin. `--print-timeout` takes a Go duration (`600s`).
-- Model: `--model` accepts **either** column of `agy models` — the ID (`gemini-3.7-flash-high`) or the display label (`Gemini 3.7 Flash (High)`). Auth required to list.
-- Stream routing differs per subcommand: `agy models` puts the `<id>\t<label>` rows on **stdout** and its "Fetching available models..." line on stderr (on a TTY it echoes rows to both); **`agy --help` writes entirely to stderr** (exit code 0), so `executeCommand` (stdout-only) returns an empty string for it. Read both streams — see `src/utils/modelList.ts`.
-- Resume: `--conversation <uuid>` or `--continue`. **The conversation ID is not printed to stdout** — it's recovered from the CLI log (`--log-file`). Log formats seen: `Created conversation <uuid>` (new runs) and `Print mode: starting (..., conversationID="<uuid>")` (resumed runs — no "Created" line). The old 1.0.x `Print mode: conversation=<uuid>` form is gone; `parseConversationIdFromLog` matches all three.
-- 1.0.x replayed the previous assistant message on resume; 1.1.14 no longer does. The prefix-stripping in `ask-agy.tool.ts` is now a harmless no-op.
-- Flags added since 1.0.7, **not yet wired into any tool**: `--effort` (low|medium|high), `--output-format` (text|json|stream-json), `--input-format`, `--json-schema`, `--agent`, `--mode` (accept-edits|plan), `--project` / `--new-project`, `--disable-slash-commands`, `-c`/`-i` aliases. New subcommands: `agents`, `install`. Constants for these live in `CLI.FLAGS` for reference only.
-- Config lives under `~/.gemini/antigravity-cli/`; `"model"` there is the CLI's own default, used whenever a tool omits `--model`.
+- `read`: `--mode plan` and a session-only `--settings` allowlist for `git status`, `git diff`, `git log`, `git show`, `rg`, `Get-ChildItem`, `Get-Content`, `ls` and `cat`. The prompt asks the agent to avoid shell commands because an auto-denied command aborts a headless run. Plan mode ends after its planning turn, so a second stdin turn requests the complete answer; the last result wins.
+- `write`: `--mode accept-edits --sandbox` and session-only `--settings` allowing `command(*)`.
+- `trusted`: `--mode accept-edits` and the same `command(*)` rule, without `--sandbox`. Normal approvals still apply. Use for worktree jobs on the user's own repos when the Windows sandbox breaks Git Bash/MSYS2.
+- `full`: `--dangerously-skip-permissions`; bypasses sandbox and approvals and requires an explicit request.
+
+The existing ask, digest, review, plan and brainstorm tools default to read; background, delegate and batch default to write. `agy_job_start` defaults to read. `mode`, `effort` and `jsonSchema` are wired into the existing execution tools; legacy `sandbox` and `skipPermissions` options are checked for conflicts.
+
+The shared tools are `agy_job_start`, `agy_job_status`, `agy_job_result`, `agy_job_cancel`, `agy_job_list`, `agy_job_read`, `agy_job_requeue` and `agy_worktree_collect`. Jobs share `~/.agent-jobs` with the Codex fork; `AGENT_JOBS_HOME` overrides it. `agy_usage` runs `agy -p /usage --output-format json` without a model turn. Set `AGENT_JOBS_CHANNEL=1` in the MCP registration to opt in to metadata-only stop notifications; Claude Code must be launched with `claude-agents` (`claude --dangerously-load-development-channels server:codex server:agy`).
 
 ## Conventions
 
-- ESM (`"type": "module"`), Node16 module resolution — all relative imports need `.js` extension.
-- Tool names use the `ask-antigravity` / `plan-antigravity` style; internal files use the `agy` shorthand.
+- ESM (`"type": "module"`), Node16 module resolution; relative imports need `.js` extensions.
+- Existing tool names use the `ask-antigravity` style; shared job tools use the `agy_` prefix.

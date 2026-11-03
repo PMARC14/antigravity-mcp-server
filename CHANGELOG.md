@@ -7,8 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Shared `agy_job_*` tools, worktree collection, usage reporting and opt-in channel notifications.
+- Trusted mode for worktree jobs that need unsandboxed commands with normal approvals on Windows.
+
 ### Changed
 
+- Read mode supplies a read-only command allowlist and a follow-up turn for headless plan mode.
 - Target agy 1.4.9: stdin NDJSON prompts, stream-json results and native conversation IDs, mode/effort/schema options, refreshed models and explicit Gemini defaults.
 - **Breaking:** background, delegate and batch default to sandboxed write mode with permission skipping disabled. Full permissions require an explicit request; conflicting legacy flags are rejected.
 - Hide spawned windows, resolve npm shims without a shell, handle child/stdin errors, and keep separate background stderr and full prompt files in the existing store.
