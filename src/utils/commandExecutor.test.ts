@@ -9,6 +9,8 @@ import { join } from "path";
 import { tmpdir } from "os";
 import { executeCommandDetailed } from "./commandExecutor.js";
 import { resolveExecutable } from "./processSpawner.js";
+import { executeAgy } from "./agyExecutor.js";
+import { readStdinPlan, READ_FINAL_TURN } from "./agyCommandBuilder.js";
 
 function fakeSpawn(
   t: { after: (fn: () => void) => void },
@@ -89,8 +91,8 @@ test("stdin EPIPE is handled even when the child exits successfully", async (t) 
   const result = await executeCommandDetailed("fixture", [], {
     stdin: "prompt\n",
   });
-  assert.equal(result.ok, false);
-  assert.match(result.stderr, /EPIPE/);
+  assert.equal(result.ok, true);
+  assert.equal(result.stderr, "");
 });
 
 test("synchronous spawn errors are handled", async (t) => {
@@ -128,4 +130,89 @@ test("npm .cmd shims resolve directly to node and a script", () => {
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }
+});
+
+for (const scenario of [
+  { name: "complete", first: "Complete answer", denied: [], second: undefined, turns: 1, final: "Complete answer" },
+  { name: "denied", first: "I'll start by reading", denied: [{ action: "command" }], second: "Recovered answer", turns: 2, final: "Recovered answer" },
+  { name: "empty first", first: "  ", denied: [], second: "Recovered answer", turns: 2, final: "Recovered answer" },
+  { name: "empty second", first: "Earlier answer", denied: [{ action: "command" }], second: " \n", turns: 2, final: "Earlier answer" },
+]) {
+  test(`legacy executeAgy read mode: ${scenario.name}`, async (t) => {
+    fakeSpawn(t, child => {
+      const input = child.stdin as PassThrough;
+      const first = JSON.parse(input.read().toString().trim());
+      assert.match(first.message.content, /task/);
+      assert.equal(input.writableEnded, false);
+      const result = JSON.stringify({ event: "result", result: {
+        status: "SUCCESS", response: scenario.first, denied_actions: scenario.denied,
+      } }) + "\n";
+      child.stdout!.emit("data", Buffer.from(result.slice(0, 15)));
+      assert.equal(input.writableEnded, false, "partial NDJSON does not decide");
+      child.stdout!.emit("data", Buffer.from(result.slice(15)));
+      assert.equal(input.writableEnded, true);
+      if (scenario.turns === 2) {
+        assert.equal(JSON.parse(input.read().toString().trim()).message.content, READ_FINAL_TURN);
+        child.stdout!.emit("data", Buffer.from(JSON.stringify({ event: "result", result: {
+          status: "SUCCESS", response: scenario.second,
+        } }) + "\n"));
+      }
+      assert.equal(input.read(), null, "no extra turns");
+      child.emit("close", 0, null);
+    });
+    const result = await executeAgy("task", { mode: "read" });
+    assert.equal(result.output, scenario.final);
+  });
+}
+
+test("read mode with no result times out and closes stdin before killing", async t => {
+  let input: PassThrough | undefined;
+  fakeSpawn(t, child => {
+    input = child.stdin as PassThrough;
+    assert.equal(input.writableEnded, false);
+    Object.assign(child, { kill: () => {
+      assert.equal(input!.writableEnded, true);
+      child.emit("close", null, "SIGTERM");
+      return true;
+    } });
+  });
+  const result = await executeCommandDetailed("fixture", [], {
+    stdin: "first\n", stdinPlan: readStdinPlan, timeoutMs: 30,
+  });
+  assert.equal(result.timedOut, true);
+  assert.equal(result.ok, false);
+  assert.equal(input!.writableEnded, true);
+});
+
+test("read recovery safely ignores a synchronous EPIPE", async t => {
+  fakeSpawn(t, child => {
+    const input = child.stdin as PassThrough;
+    input.read();
+    input.write = () => { throw Object.assign(new Error("closed"), { code: "EPIPE" }); };
+    child.stdout!.emit("data", Buffer.from('{"event":"result","result":{"response":""}}\n'));
+    assert.equal(input.writableEnded, true);
+    child.emit("close", 0, null);
+  });
+  const result = await executeCommandDetailed("fixture", [], { stdin: "first\n", stdinPlan: readStdinPlan });
+  assert.equal(result.ok, true);
+});
+
+test("a retried read process gets a fresh first-result decision", async t => {
+  let attempts = 0;
+  fakeSpawn(t, child => {
+    attempts++;
+    const input = child.stdin as PassThrough;
+    input.read();
+    assert.equal(input.writableEnded, false);
+    child.stdout!.emit("data", Buffer.from('{"event":"result","result":{"response":""}}\n'));
+    assert.equal(JSON.parse(input.read().toString()).message.content, READ_FINAL_TURN);
+    assert.equal(input.writableEnded, true);
+    child.emit("close", attempts === 1 ? 75 : 0, null);
+  });
+  const result = await executeCommandDetailed("fixture", [], {
+    stdin: "first\n", stdinPlan: readStdinPlan,
+    retry: { attempts: 2, backoffMs: 1, retryOn: ["transient"] },
+  });
+  assert.equal(attempts, 2);
+  assert.equal(result.ok, true);
 });

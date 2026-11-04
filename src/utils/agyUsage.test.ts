@@ -66,6 +66,13 @@ const usageJson = JSON.stringify({
 test("parses /usage into used percentages, resets and a meter line", () => {
   const q = parseAgyQuota(usageJson, NOW);
   assert.equal(q.available, true);
+  assert.equal(q.source, 'live');
+  assert.equal(q.snapshotAt, new Date(NOW).toISOString());
+  assert.equal(q.snapshotAgeSec, 0);
+  assert.equal(q.meter, q.summary);
+  assert.equal(q.groups[0].fiveHour?.resetsAt, Date.parse('2026-10-31T20:39:33Z') / 1000);
+  assert.equal(q.groups[0].fiveHour?.resetAtIso, '2026-10-31T20:39:33.000Z');
+  assert.equal(q.groups[0].fiveHour?.windowMinutes, 300);
   assert.equal(q.groups[0].fiveHour?.usedPercent, 2);
   assert.equal(q.groups[0].weekly?.usedPercent, 25);
   assert.equal(q.groups[0].fiveHour?.resetIn, "in 2h 39m");
@@ -139,6 +146,9 @@ test("caches for five minutes, honors refresh, writes status file only if dir ex
     });
     assert.equal(calls, 2);
     assert.equal(hit.available, true);
+    assert.equal(hit.source, 'cache');
+    assert.equal(hit.snapshotAt, new Date(NOW).toISOString());
+    assert.ok(hit.snapshotAgeSec! > 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

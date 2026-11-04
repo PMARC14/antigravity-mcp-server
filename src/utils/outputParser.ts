@@ -38,7 +38,8 @@ export function parseAgyOutput(
       if (!result) continue;
       conversationId = result.conversation_id || conversationId;
       status = result.status;
-      if (typeof result.response === "string") response = result.response;
+      if (typeof result.response === "string" && result.response.trim())
+        response = result.response;
       if (typeof result.error === "string") eventError = result.error;
     }
   }

@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { UnifiedTool, StructuredToolResult } from "./registry.js";
-import { executeCommand } from "../utils/commandExecutor.js";
+import { AgyConnector } from "../connectors/agy.js";
+import { readConfig } from "../jobs/config.js";
+import { DEFAULT_MODEL, MODELS, REVIEW_MODEL } from "../constants.js";
 import { fetchModels } from "../utils/modelList.js";
 import { getSessionStats, getSession } from "../utils/sessionStorage.js";
 import { Logger } from "../utils/logger.js";
@@ -23,6 +25,12 @@ interface HealthStatus {
     version: string;
     authenticated: boolean;
     models: string[];
+    available: boolean;
+    exe?: string;
+    reason?: string;
+    reviewModel: string;
+    defaultModel: string | null;
+    jobsEnabled: boolean;
   };
   sessions: {
     total: number;
@@ -39,35 +47,28 @@ interface HealthStatus {
   issues: string[];
 }
 
-async function getAgyVersion(): Promise<string> {
-  try {
-    const result = await executeCommand("agy", ["--version"], undefined, 5000);
-    return result.trim();
-  } catch {
-    return "";
-  }
-}
-
 /**
  * `agy models` requires a valid login (it queries the backend for available
  * models), so a non-empty result doubles as an authentication check.
  */
 async function getModels(): Promise<string[]> {
   try {
-    return (await fetchModels()).map((m) => m.label);
+    return (await fetchModels()).map((m) => m.id).filter(Boolean);
   } catch {
     return [];
   }
 }
 
-async function buildHealthStatus(sessionId?: string): Promise<HealthStatus> {
+export async function buildHealthStatus(sessionId?: string, connector = new AgyConnector(), liveModels = getModels): Promise<HealthStatus> {
   const issues: string[] = [];
   let status: HealthStatus["status"] = "healthy";
 
-  const versionOutput = await getAgyVersion();
-  const installed = !!versionOutput;
-  const models = installed ? await getModels() : [];
-  const authenticated = models.length > 0;
+  const detection = await connector.detect();
+  const config = readConfig().connectors.agy;
+  const installed = detection.available;
+  const fetchedModels = installed ? await liveModels() : [];
+  const models = fetchedModels.length ? fetchedModels : Object.values(MODELS);
+  const authenticated = fetchedModels.length > 0;
 
   if (!installed) {
     issues.push("Antigravity CLI not installed or not in PATH");
@@ -117,8 +118,12 @@ async function buildHealthStatus(sessionId?: string): Promise<HealthStatus> {
   return {
     status,
     agyCli: {
+      ...detection,
       installed,
-      version: versionOutput || "unknown",
+      version: detection.version || "unknown",
+      reviewModel: config?.reviewModel ?? REVIEW_MODEL,
+      defaultModel: config?.defaultModel ?? DEFAULT_MODEL,
+      jobsEnabled: config?.enabled !== false,
       authenticated,
       models,
     },
@@ -144,6 +149,7 @@ function formatReport(h: HealthStatus, verbose: boolean): string {
   out += `| Version | ${h.agyCli.version} |\n`;
   out += `| Authenticated | ${h.agyCli.authenticated ? "✅ Yes" : "⚠️ Unknown"} |\n\n`;
 
+  out += `Review model: ${h.agyCli.reviewModel}\n\n`;
   if (h.agyCli.models.length > 0) {
     out += `### Available Models\n`;
     for (const m of h.agyCli.models) out += `- ${m}\n`;
@@ -211,6 +217,7 @@ export const healthTool: UnifiedTool = {
       agyCli: { type: "object" },
       sessions: { type: "object" },
       issues: { type: "array" },
+      error: { type: "string" },
     },
     required: ["status", "agyCli", "sessions", "issues"],
   },
@@ -230,7 +237,16 @@ export const healthTool: UnifiedTool = {
     } catch (error) {
       Logger.error("Health check failed:", error);
       const msg = error instanceof Error ? error.message : String(error);
-      return `❌ **Health Check Failed**\n\nError: ${msg}\n\nThis may indicate Antigravity CLI is not properly installed.`;
+      return {
+        text: `Health check failed: ${msg}`,
+        structuredContent: {
+          status: "unhealthy",
+          agyCli: { available: false, installed: false, version: "unknown", authenticated: false,
+            models: [], reviewModel: REVIEW_MODEL, defaultModel: DEFAULT_MODEL, jobsEnabled: false },
+          sessions: { total: 0, withResume: 0, maxSessions: 0, ttlHours: 0 },
+          issues: [msg], error: msg,
+        },
+      } as StructuredToolResult;
     }
   },
 };

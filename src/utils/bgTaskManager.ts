@@ -21,6 +21,8 @@ import { randomBytes } from "crypto";
 import {
   AgyCommandBuilder,
   AgyCommandBuilderOptions,
+  READ_FINAL_TURN,
+  userTurn,
 } from "./agyCommandBuilder.js";
 import { Logger } from "./logger.js";
 import { parseConversationIdFromLog } from "./agyExecutor.js";
@@ -238,7 +240,10 @@ export async function startBgTask(
           child.kill("SIGKILL");
         }, options.timeoutMs ?? 600000);
         timeoutId.unref();
-        child.stdin?.end(stdin);
+        // This legacy detached runner writes stdout directly to files and has no
+        // event loop that survives server exit. Preserve its buffered read input;
+        // shared jobs and synchronous tools use the conditional stdin plan.
+        child.stdin?.end(stdin + (mode === "read" ? userTurn(READ_FINAL_TURN) : ""));
         child.unref();
         resolve();
       });

@@ -86,7 +86,7 @@ export async function executeAgy(
   const builder = new AgyCommandBuilder();
   const timeoutMs =
     options?.timeout || options?.timeoutMs || DEFAULT_TIMEOUT_MS;
-  const { args, tempFiles, workingDir, stdin, logFile } = await builder.build(
+  const { args, tempFiles, workingDir, stdin, stdinPlan, logFile } = await builder.build(
     prompt,
     {
       ...options,
@@ -112,6 +112,7 @@ export async function executeAgy(
       retry: options?.retry,
       cwd: workingDir,
       stdin,
+      stdinPlan,
     });
 
     const parsed = parseAgyOutput(result.stdout, result.stderr);

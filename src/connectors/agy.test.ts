@@ -57,9 +57,9 @@ test("read mode uses plan, stdin NDJSON and the default model", () => {
   const turns = stdin.trim().split("\n").map((line) => JSON.parse(line));
   assert.equal(turns[0].event, "user");
   assert.ok(turns[0].message.content.endsWith(spec.prompt));
-  // Plan mode stops after its planning turn; the second turn asks for the answer.
-  assert.ok(stdin.endsWith("\n") && turns.length === 2);
-  assert.match(turns[1].message.content, /complete final answer/);
+  // Recovery is conditional on the first result.
+  assert.ok(stdin.endsWith("\n") && turns.length === 1);
+  assert.ok(connector.build(spec).stdinPlan);
   assert.equal(args.includes("--dangerously-skip-permissions"), false);
 });
 
@@ -174,4 +174,7 @@ test("quota errors become usage_limit with best-effort reset", () => {
   assert.equal(answer?.usageLimit, undefined);
   assert.equal(answer?.final, "The rate limit is 5/min");
   assert.equal(connector.parse("not json", "stdout"), null);
+  assert.equal(connector.parse('quota for model "fake-model" exhausted', 'stderr')?.usageLimit?.model, 'fake-model');
+  const justPassed = new Date(2026, 10, 4, 17, 37, 10);
+  assert.equal(agyUsageReset('try again at 5:37 PM', justPassed), justPassed.getTime() + 60000);
 });

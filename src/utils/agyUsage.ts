@@ -1,3 +1,4 @@
+import { usageWindow, type UsageWindow as CommonUsageWindow } from "../jobs/usage.js";
 import {
   existsSync,
   readdirSync,
@@ -14,8 +15,8 @@ import { spawnCommand } from "./processSpawner.js";
 // Official quota: `agy -p /usage --output-format json`
 // ---------------------------------------------------------------------------
 
-export interface UsageWindow {
-  usedPercent: number;
+export interface UsageWindow extends CommonUsageWindow {
+  /** Compatibility alias for resetAtIso. */
   resetAt: string;
   resetIn: string;
 }
@@ -30,15 +31,14 @@ export interface UsageGroup {
 export interface AgyQuota {
   available: boolean;
   reason?: string;
+  source: "live" | "cache";
+  snapshotAt?: string;
+  snapshotAgeSec?: number;
+  meter?: string;
+  /** Compatibility aliases: takenAt is epoch seconds; summary is meter. */
   takenAt?: number;
   groups: UsageGroup[];
   summary?: string;
-}
-
-function resetIn(reset: number, now: number): string {
-  const minutes = Math.floor((reset - now) / 60000);
-  if (minutes <= 0) return "reset";
-  return `in ${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
 const shortName = (name: string): string =>
@@ -58,6 +58,7 @@ export function parseAgyQuota(raw: string, now = Date.now()): AgyQuota {
   } catch {
     return {
       available: false,
+      source: "live",
       reason: "agy /usage did not return JSON",
       groups: [],
     };
@@ -68,7 +69,7 @@ export function parseAgyQuota(raw: string, now = Date.now()): AgyQuota {
       typeof data?.response === "string" && data.response.trim()
         ? data.response.trim().slice(0, 300)
         : "no usage groups in agy output (sign in again?)";
-    return { available: false, reason: why, groups: [] };
+    return { available: false, source: "live", reason: why, groups: [] };
   }
   const groups: UsageGroup[] = [];
   for (const g of rawGroups) {
@@ -79,9 +80,9 @@ export function parseAgyQuota(raw: string, now = Date.now()): AgyQuota {
       if (typeof b?.remaining_fraction !== "number" || Number.isNaN(reset))
         continue;
       const window: UsageWindow = {
-        usedPercent: Math.round((1 - b.remaining_fraction) * 100),
+        ...usageWindow(Math.round((1 - b.remaining_fraction) * 100), reset / 1000, now,
+          b.window === "5h" ? 300 : b.window === "weekly" ? 10080 : undefined),
         resetAt: new Date(reset).toISOString(),
-        resetIn: resetIn(reset, now),
       };
       if (b.window === "5h") group.fiveHour = window;
       else if (b.window === "weekly") group.weekly = window;
@@ -91,6 +92,7 @@ export function parseAgyQuota(raw: string, now = Date.now()): AgyQuota {
   if (!groups.length)
     return {
       available: false,
+      source: "live",
       reason: "agy returned no quota buckets",
       groups,
     };
@@ -107,7 +109,8 @@ export function parseAgyQuota(raw: string, now = Date.now()): AgyQuota {
           .join(" · "),
       )
       .join(" · ");
-  return { available: true, takenAt: Math.floor(now / 1000), groups, summary };
+  return { available: true, source: "live", snapshotAt: new Date(now).toISOString(),
+    snapshotAgeSec: 0, meter: summary, takenAt: Math.floor(now / 1000), groups, summary };
 }
 
 export type UsageRunner = (timeoutMs: number) => Promise<string>;
@@ -165,7 +168,11 @@ export async function fetchAgyQuota(
       if (now - statSync(cachePath).mtimeMs < ttl && cached?.available) {
         for (const g of cached.groups as UsageGroup[])
           for (const w of [g.fiveHour, g.weekly])
-            if (w) w.resetIn = resetIn(Date.parse(w.resetAt), now);
+            if (w) Object.assign(w, usageWindow(w.usedPercent, Date.parse(w.resetAt) / 1000, now, w.windowMinutes));
+        cached.source = "cache";
+        cached.snapshotAt ??= new Date(cached.takenAt * 1000).toISOString();
+        cached.snapshotAgeSec = Math.max(0, Math.round((now - Date.parse(cached.snapshotAt)) / 1000));
+        cached.meter ??= cached.summary;
         return cached as AgyQuota;
       }
     } catch {
@@ -178,6 +185,7 @@ export async function fetchAgyQuota(
   } catch (error) {
     quota = {
       available: false,
+      source: "live",
       reason: `agy /usage failed: ${(error as Error).message}`,
       groups: [],
     };

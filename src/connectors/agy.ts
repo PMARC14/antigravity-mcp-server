@@ -9,46 +9,14 @@ const QUOTA_PATTERN =
   /quota|rate[ _-]?limit|resource[ _]exhausted|exhausted|usage limit|\b429\b/i;
 const DENIED_PATTERN = /no output produced.*auto-denied/i;
 
-/**
- * Best-effort reset time from quota text. The real agy quota message has not
- * been captured, so this handles common shapes: "in 2h 30m", "retry after 90
- * seconds", "retryDelay":"3600s", and an ISO timestamp after "reset(s) at".
- */
-export function agyUsageReset(
-  message: string,
-  now = new Date(),
-): number | undefined {
-  const iso =
-    /reset(?:s|ting)?(?:\s+at|\s+on|:)?\s*"?(\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|[+-]\d{2}:?\d{2})?)/i.exec(
-      message,
-    );
-  if (iso) {
-    const t = Date.parse(iso[1]);
-    if (!Number.isNaN(t)) return t;
-  }
-  const delay = /retry[_ ]?(?:delay|after)"?[:\s]+"?(\d+(?:\.\d+)?)\s*s/i.exec(
-    message,
-  );
-  if (delay) return now.getTime() + Number(delay[1]) * 1000;
-  const rel =
-    /\b(?:in|after)\s+(?=\d)(?:(\d+)\s*(?:h|hours?)\s*)?(?:(\d+)\s*(?:m|min|minutes?)\s*)?(?:(\d+)\s*(?:s|sec|seconds?))?\b/i.exec(
-      message,
-    );
-  if (rel && (rel[1] || rel[2] || rel[3])) {
-    const ms =
-      (Number(rel[1] ?? 0) * 3600 +
-        Number(rel[2] ?? 0) * 60 +
-        Number(rel[3] ?? 0)) *
-      1000;
-    if (ms > 0) return now.getTime() + ms;
-  }
-  return undefined;
-}
+// Vendor-neutral reset formats, including minute-precision local clocks.
+export { usageReset as agyUsageReset } from "../jobs/usage-reset.js";
+import { usageLimit } from "../jobs/usage-reset.js";
 
 function quotaEvent(message: string): JobEvent {
   return {
     error: message,
-    usageLimit: { resetAt: agyUsageReset(message) },
+    usageLimit: usageLimit(message),
   };
 }
 
@@ -58,7 +26,7 @@ export class AgyConnector implements Connector {
   readonly reviewModel = REVIEW_MODEL;
   private readonly builder = new AgyCommandBuilder();
 
-  async detect() {
+  async detect(): ReturnType<Connector['detect']> {
     try {
       const version = (
         await executeCommand(CLI.COMMANDS.AGY, ["--version"], undefined, 5000)
@@ -84,11 +52,15 @@ export class AgyConnector implements Connector {
     return Object.values(MODELS);
   }
 
+  async health() {
+    return { ...(await this.detect()), models: await this.models(), reviewModel: this.reviewModel };
+  }
+
   sandboxDirs(job: JobSpec): string[] {
     return job.worktree ? [job.worktree.gitDir] : [];
   }
 
-  build(job: JobSpec) {
+  build(job: JobSpec): ReturnType<Connector['build']> {
     const built = this.builder.buildSync(job.prompt, {
       model: job.model ?? this.defaultModel,
       mode: job.mode,
@@ -98,7 +70,7 @@ export class AgyConnector implements Connector {
       workingDir: job.cwd,
       logFile: join(dirname(job.finalPath), "agy.log"),
     });
-    return { exe: CLI.COMMANDS.AGY, args: built.args, stdin: built.stdin };
+    return { exe: CLI.COMMANDS.AGY, args: built.args, stdin: built.stdin, stdinPlan: built.stdinPlan };
   }
 
   parse(line: string, stream: "stdout" | "stderr"): JobEvent | null {

@@ -97,6 +97,13 @@ test("background spawn persists full prompts and separate streams with safe defa
   assert.equal(bg.getBgTask(meta.taskId)?.conversationId, "result-id");
   assert.equal(bg.getBgTask(meta.taskId)?.state, "completed");
   assert.equal(bg.removeBgTask(meta.taskId), true);
+  const readTask = await bg.startBgTask('inspect', { mode: 'read' });
+  const turns = (child!.stdin as PassThrough).read().toString().trim().split('\n').map(JSON.parse);
+  assert.equal(turns.length, 2, 'legacy detached read input retains its existing buffered recovery');
+  assert.match(turns[1].message.content, /complete final answer/);
+  assert.equal(child!.stdin!.writableEnded, true);
+  child!.emit('close', 0, null);
+  assert.equal(bg.removeBgTask(readTask.taskId), true);
 });
 
 test("background spawn failure is persisted without a running pid", async (t) => {

@@ -1,3 +1,4 @@
+import type { StdinPlan } from "../jobs/stdin.js";
 import { CLI, DEFAULT_MODEL } from "../constants.js";
 import { resolveWorkingDirectory } from "./workingDirResolver.js";
 import { unlinkSync } from "fs";
@@ -38,6 +39,7 @@ export interface BuildResult {
   workingDir?: string;
   logFile: string;
   stdin: string;
+  stdinPlan?: StdinPlan;
 }
 
 export function resolveAgyMode(
@@ -87,24 +89,29 @@ export const READ_ONLY_COMMANDS = [
 export const READ_PREFIX =
   "This is a read-only task: everything you need is in this message. Use file-reading tools if you must; avoid shell commands.\n\n";
 
-/** The follow-up turn read mode sends after the prompt (see stdinTurns). */
+/** Recovery turn, sent only when the first result is empty or reports denials. */
 export const READ_FINAL_TURN =
   "Now give your complete final answer to the task above, in full. Do not ask for approval and do not modify anything.";
 
-/**
- * The NDJSON turns sent on stdin, one per line.
- *
- * Read mode is agy's `--mode plan`, which ends a headless run after its
- * planning turn ("I'll inspect the repository…"), so it sends a second turn
- * asking for the answer itself; the last result wins.
- */
-function stdinTurns(prompt: string, mode: AgyMode): string {
-  const turn = (content: string) =>
-    JSON.stringify({ event: "user", message: { content } }) + "\n";
-  return mode === "read"
-    ? turn(READ_PREFIX + prompt) + turn(READ_FINAL_TURN)
-    : turn(prompt);
-}
+export const userTurn = (content: string): string =>
+  JSON.stringify({ event: "user", message: { content } }) + "\n";
+
+/** One decision per process; a retry gets a fresh handler. */
+export const readStdinPlan: StdinPlan = () => {
+  let decided = false;
+  return (line, stream) => {
+    if (decided || stream !== "stdout") return;
+    let data;
+    try { data = JSON.parse(line); } catch { return; }
+    if (data?.event !== "result" || !data.result) return;
+    decided = true;
+    const result = data.result;
+    const needsAnswer =
+      (Array.isArray(result.denied_actions) && result.denied_actions.length > 0) ||
+      typeof result.response !== "string" || !result.response.trim();
+    return { write: needsAnswer ? userTurn(READ_FINAL_TURN) : undefined, close: true };
+  };
+};
 
 export class AgyCommandBuilder {
   async build(
@@ -183,7 +190,8 @@ export class AgyCommandBuilder {
         prompt,
       }),
       logFile,
-      stdin: stdinTurns(finalPrompt, mode),
+      stdin: userTurn(mode === "read" ? READ_PREFIX + finalPrompt : finalPrompt),
+      stdinPlan: mode === "read" ? readStdinPlan : undefined,
     };
   }
 

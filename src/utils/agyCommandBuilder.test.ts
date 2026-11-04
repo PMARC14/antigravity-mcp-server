@@ -11,16 +11,15 @@ for (const mode of ["read", "write", "full"] as const) {
     const first =
       JSON.stringify({ event: "user", message: { content: prompt } }) + "\n";
     if (mode === "read") {
-      // Plan mode ends a headless run after its planning turn, so read mode
-      // sends a second turn asking for the full answer.
+      // Read mode waits for the first result before deciding on recovery.
       const lines = result.stdin.trimEnd().split("\n");
-      assert.equal(lines.length, 2);
+      assert.equal(lines.length, 1);
       // A denied command aborts a headless run, so the first turn says the
       // content is provided, and read-only commands get a session allow rule.
       const firstTurn = JSON.parse(lines[0]).message.content;
       assert.match(firstTurn, /^This is a read-only task/);
       assert.ok(firstTurn.endsWith(prompt));
-      assert.match(JSON.parse(lines[1]).message.content, /complete final answer/);
+      assert.ok(result.stdinPlan);
       const settings = JSON.parse(result.args[result.args.indexOf("--settings") + 1]);
       assert.ok(settings.permissions.allow.includes("command(git diff*)"));
       assert.ok(!settings.permissions.allow.includes("command(*)"));

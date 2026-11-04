@@ -101,7 +101,7 @@ The server explicitly defaults to `gemini-3.8-flash-high`; review uses `gemini-4
 }
 ```
 
-Prompts always use one JSON-encoded NDJSON user event on stdin with `--input-format stream-json --output-format stream-json`. The server reads the conversation ID from `init` or `result` events, using the CLI log only as a fallback. The next call with the same `sessionId` resumes via `agy --conversation <uuid>`.
+Prompts initially use one JSON-encoded NDJSON user event on stdin with `--input-format stream-json --output-format stream-json`. The server reads the conversation ID from `init` or `result` events, using the CLI log only as a fallback. The next call with the same `sessionId` resumes via `agy --conversation <uuid>`.
 
 You can also pass a native `conversationId` directly, or `continueLatest: true` for `agy --continue`.
 
@@ -113,7 +113,7 @@ Session storage is in-memory (lost on server restart). Configure with:
 
 ## Safety and execution options
 
-- `read` uses `--mode plan` with a session-only read-only command allowlist. A follow-up turn requests the final answer because plan mode otherwise stops after planning; denied commands can abort a headless run.
+- `read` uses `--mode plan` with a session-only read-only command allowlist. Stdin stays open until the first result. A follow-up requests the final answer only if that result reports non-empty `denied_actions` or an empty response; stdin then closes. Complete first answers finish immediately. A later empty response preserves the earlier non-empty answer. Normal timeout or cancellation closes stdin and terminates the process when no result arrives.
 - `write` uses `--mode accept-edits --sandbox` with the session-only settings rule `{"permissions":{"allow":["command(*)"]}}`, allowing shell commands to run headless.
 - `trusted` uses `--mode accept-edits` with the same command rule, without `--sandbox`; normal approvals apply. It supports worktree jobs on the user's own repos when the Windows sandbox breaks Git Bash/MSYS2.
 - `full` uses `--dangerously-skip-permissions` and requires an explicit request.
@@ -121,6 +121,8 @@ Session storage is in-memory (lost on server restart). Configure with:
 Permission skipping is never the default. `agy_job_start` defaults to read. Legacy `skipPermissions: true` selects full mode; `sandbox: true` selects write mode. Explicit false values disable those features (`sandbox: false` selects read when mode is omitted). Conflicting mode and legacy flags are rejected. Defaults are applied after checking caller input so `mode: "full"` works without an implicit false flag conflicting with it.
 
 The existing execution tools accept `effort` (low, medium, high, xhigh, max) and `jsonSchema` (a schema object or JSON string). Settings and schemas are individual argv elements; prompts never enter a shell or the command line.
+
+Legacy `bg-antigravity` and detached delegate jobs capture stdout directly to files and retain their existing buffered two-turn read input. Use `agy_job_start` for conditional read recovery.
 
 Background records stay in `~/.agy-mcp/bg/`. New records keep the full prompt in a separate file and stdout/stderr separately; old records remain readable. Tasks whose process disappeared without a recorded exit have unknown status. Delegate collection stages all changes, saves a binary-capable patch against the starting SHA, and returns at most 20k characters per output plus the patch path before optional cleanup.
 
@@ -143,3 +145,5 @@ npm run format      # prettier
 ## License
 
 MIT
+
+Shared job tools, quota and health fields are documented in [docs/agent-jobs.md](docs/agent-jobs.md). The [symmetry audit](docs/job-surface-audit.md) records intentional vendor differences and legacy-tool recommendations.

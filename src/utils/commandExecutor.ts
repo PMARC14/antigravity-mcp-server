@@ -1,3 +1,5 @@
+import { StringDecoder } from "node:string_decoder";
+import { closedPipe, updateStdin, type StdinPlan } from "../jobs/stdin.js";
 import { spawnCommand } from "./processSpawner.js";
 import { Logger } from "./logger.js";
 
@@ -28,6 +30,7 @@ export interface ExecuteOptions {
    * Prompts use this pipe rather than the command line.
    */
   stdin?: string;
+  stdinPlan?: StdinPlan;
   trimOutput?: boolean;
 }
 
@@ -46,6 +49,7 @@ export async function executeCommandDetailed(
     retry,
     cwd,
     stdin,
+    stdinPlan,
     trimOutput = true,
   } = options;
 
@@ -60,6 +64,7 @@ export async function executeCommandDetailed(
       maxOutputBytes,
       cwd,
       stdin,
+      stdinPlan,
       trimOutput,
     });
 
@@ -98,6 +103,7 @@ async function executeOnce(
     maxOutputBytes,
     cwd,
     stdin,
+    stdinPlan,
     trimOutput,
   }: Omit<ExecuteOptions, "retry">,
 ): Promise<CommandResult> {
@@ -132,10 +138,28 @@ async function executeOnce(
     let outputExceeded = false;
     let stdinError: Error | undefined;
     let didTimeOut = false;
+    const inputHandler = stdinPlan?.();
+    const decoder = new StringDecoder("utf8");
+    let inputBuffer = "";
+    const feedInput = (chunk: string, flush = false) => {
+      if (!inputHandler) return;
+      inputBuffer += chunk;
+      const lines = inputBuffer.split("\n");
+      inputBuffer = lines.pop()!;
+      if (flush && inputBuffer) { lines.push(inputBuffer); inputBuffer = ""; }
+      for (const line of lines) {
+        const action = inputHandler(line.replace(/\r$/, ""), "stdout");
+        if (action) updateStdin(childProcess.stdin, action);
+      }
+    };
+    const closeInput = () => {
+      try { updateStdin(childProcess.stdin, { close: true }); } catch { /* Continue cleanup. */ }
+    };
 
     const timeoutId = setTimeout(() => {
       if (!isResolved) {
         didTimeOut = true;
+        closeInput();
         childProcess.kill("SIGTERM");
         Logger.warn(`Process timeout after ${timeoutMs}ms, sending SIGTERM`);
         const killTimer = setTimeout(() => {
@@ -152,6 +176,7 @@ async function executeOnce(
       if (maxOutputBytes && totalStdoutBytes + data.length > maxOutputBytes) {
         if (!outputExceeded) {
           outputExceeded = true;
+          closeInput();
           Logger.warn(
             `Output exceeded ${maxOutputBytes} bytes, stopping collection`,
           );
@@ -159,6 +184,7 @@ async function executeOnce(
         }
         return;
       }
+      feedInput(decoder.write(data));
       stdoutChunks.push(data);
       totalStdoutBytes += data.length;
       if (onProgress) onProgress(data.toString("utf8"));
@@ -171,6 +197,7 @@ async function executeOnce(
     childProcess.on("error", (error) => {
       if (!isResolved) {
         isResolved = true;
+        closeInput();
         clearTimeout(timeoutId);
         Logger.error(`Process error:`, error);
 
@@ -197,8 +224,10 @@ async function executeOnce(
     childProcess.on("close", (code, signal) => {
       if (!isResolved) {
         isResolved = true;
+        closeInput();
         clearTimeout(timeoutId);
 
+        feedInput(decoder.end(), true);
         const stdout = Buffer.concat(stdoutChunks).toString("utf8");
         const stderr =
           Buffer.concat(stderrChunks).toString("utf8") ||
@@ -220,9 +249,12 @@ async function executeOnce(
       }
     });
     childProcess.stdin?.on("error", (error: Error) => {
-      stdinError = error;
+      if (!closedPipe(error)) stdinError = error;
     });
-    if (stdin !== undefined) childProcess.stdin?.end(stdin);
+    if (stdin !== undefined) {
+      try { updateStdin(childProcess.stdin, { write: stdin, close: !inputHandler }); }
+      catch (error) { stdinError = error as Error; closeInput(); childProcess.kill("SIGTERM"); }
+    }
   });
 }
 
