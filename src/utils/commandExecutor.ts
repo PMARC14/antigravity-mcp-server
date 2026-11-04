@@ -138,7 +138,11 @@ async function executeOnce(
     let outputExceeded = false;
     let stdinError: Error | undefined;
     let didTimeOut = false;
-    const inputHandler = stdinPlan?.();
+    // Synchronous tools have no job event pipeline; actions go straight to the child's stdin.
+    const inputHandler = stdinPlan?.({
+      apply: (action) => updateStdin(childProcess.stdin, action),
+      emit: () => {},
+    });
     const decoder = new StringDecoder("utf8");
     let inputBuffer = "";
     const feedInput = (chunk: string, flush = false) => {
