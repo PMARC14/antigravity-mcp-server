@@ -18,6 +18,7 @@ export interface UnifiedTool {
   name: string;
   description: string;
   zodSchema: ZodTypeAny;
+  title?: string;
   annotations?: ToolAnnotations;
   execution?: { taskSupport: "optional" | "required" | "forbidden" };
   outputSchema?: {
@@ -63,7 +64,12 @@ export function getToolDefinitions(): Tool[] {
       description: tool.description,
       inputSchema,
     };
-    if (tool.annotations) toolDef.annotations = tool.annotations;
+    if (tool.title) toolDef.title = tool.title;
+    if (tool.annotations || tool.title)
+      toolDef.annotations = {
+        ...tool.annotations,
+        ...(tool.title ? { title: tool.title } : {}),
+      };
     if (tool.execution) toolDef.execution = tool.execution;
     if (tool.outputSchema) toolDef.outputSchema = tool.outputSchema;
     return toolDef;

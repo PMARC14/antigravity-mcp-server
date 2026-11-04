@@ -160,10 +160,10 @@ test("index dispatch sends watch state changes immediately and keeps other tools
     );
     const response = await pending;
     assert.equal(response.isError, false);
-    assert.match(progress.at(-1)!.message!, /^completed \| /);
+    assert.match(progress.at(-1)!.message!, /^agy [^|]+ \| completed \| /);
     assert.ok(
       progress.every((event) =>
-        /^(running|completed) \| /.test(event.message!),
+        /^agy [^|]+ \| (running|completed) \| /.test(event.message!),
       ),
     );
     assert.deepEqual(
