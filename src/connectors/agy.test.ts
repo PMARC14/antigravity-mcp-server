@@ -338,3 +338,115 @@ test("the cache preserves auth result for 10 minutes", async () => {
   assert.equal(u2.available, false);
   assert.equal(unauthCalls, 1);
 });
+
+
+test("usagePercent returns max used percent across 5h and weekly for Gemini model group", async () => {
+  const usageJsonWeeklyMax = JSON.stringify({
+    status: "SUCCESS",
+    command: {
+      data: {
+        groups: [
+          {
+            name: "Gemini Models",
+            buckets: [
+              {
+                id: "gemini-weekly",
+                window: "weekly",
+                remaining_fraction: 0.75, // 25% used
+                reset_time: "2026-11-01T00:17:22Z",
+              },
+              {
+                id: "gemini-5h",
+                window: "5h",
+                remaining_fraction: 0.98, // 2% used
+                reset_time: "2026-10-31T20:39:33Z",
+              },
+            ],
+          },
+          {
+            name: "Claude and GPT models",
+            buckets: [
+              {
+                id: "3p-weekly",
+                window: "weekly",
+                remaining_fraction: 0.05, // 95% used (should NOT be used, jobs use Gemini)
+                reset_time: "2026-11-07T15:48:01Z",
+              },
+            ],
+          },
+        ],
+      },
+    },
+  });
+
+  const c1 = new AgyConnector({
+    runUsage: async () => usageJsonWeeklyMax,
+  });
+  const percent1 = await c1.usagePercent();
+  assert.equal(percent1, 25);
+
+  const usageJson5hMax = JSON.stringify({
+    status: "SUCCESS",
+    command: {
+      data: {
+        groups: [
+          {
+            name: "Gemini Models",
+            buckets: [
+              {
+                id: "gemini-weekly",
+                window: "weekly",
+                remaining_fraction: 0.75, // 25% used
+                reset_time: "2026-11-01T00:17:22Z",
+              },
+              {
+                id: "gemini-5h",
+                window: "5h",
+                remaining_fraction: 0.15, // 85% used
+                reset_time: "2026-10-31T20:39:33Z",
+              },
+            ],
+          },
+        ],
+      },
+    },
+  });
+
+  const c2 = new AgyConnector({
+    runUsage: async () => usageJson5hMax,
+  });
+  const percent2 = await c2.usagePercent();
+  assert.equal(percent2, 85);
+});
+
+test("usagePercent returns undefined on any error", async () => {
+  // Scenario 1: runUsage throws
+  const cErr = new AgyConnector({
+    runUsage: async () => {
+      throw new Error("timed out");
+    },
+  });
+  assert.equal(await cErr.usagePercent(), undefined);
+
+  // Scenario 2: malformed JSON
+  const cBadJson = new AgyConnector({
+    runUsage: async () => "not a json string",
+  });
+  assert.equal(await cBadJson.usagePercent(), undefined);
+
+  // Scenario 3: error status / sign in required
+  const cSign = new AgyConnector({
+    runUsage: async () => JSON.stringify({ status: "ERROR", response: "please sign in" }),
+  });
+  assert.equal(await cSign.usagePercent(), undefined);
+
+  // Scenario 4: empty groups
+  const cEmpty = new AgyConnector({
+    runUsage: async () =>
+      JSON.stringify({
+        status: "SUCCESS",
+        command: { data: { groups: [] } },
+      }),
+  });
+  assert.equal(await cEmpty.usagePercent(), undefined);
+});

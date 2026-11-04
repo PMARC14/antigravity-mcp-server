@@ -4,7 +4,7 @@ import { AgyCommandBuilder, AgyEffort } from "../utils/agyCommandBuilder.js";
 import { executeCommand } from "../utils/commandExecutor.js";
 import { fetchModels } from "../utils/modelList.js";
 import { CLI, DEFAULT_MODEL, MODELS, REVIEW_MODEL } from "../constants.js";
-import { runAgyUsage, type UsageRunner } from "../utils/agyUsage.js";
+import { fetchAgyQuota, runAgyUsage, type UsageRunner } from "../utils/agyUsage.js";
 
 const QUOTA_PATTERN =
   /quota|rate[ _-]?limit|resource[ _]exhausted|exhausted|usage limit|\b429\b/i;
@@ -206,6 +206,39 @@ export class AgyConnector implements Connector {
       logFile: join(dirname(job.finalPath), "agy.log"),
     });
     return { exe: CLI.COMMANDS.AGY, args: built.args, stdin: built.stdin, stdinPlan: built.stdinPlan };
+  }
+
+  /**
+   * Returns the max used percent across the 5-hour and weekly windows of the
+   * model group the job would use. Jobs default to DEFAULT_MODEL (Gemini),
+   * so this inspects the Gemini model group.
+   * Returns undefined on any error.
+   */
+  async usagePercent(): Promise<number | undefined> {
+    try {
+      const quota = await fetchAgyQuota({
+        refresh: true,
+        run: this.runUsage,
+        now: this.now(),
+      });
+      if (!quota?.available) return undefined;
+      // Jobs default to DEFAULT_MODEL (gemini-3.8-flash-high), so inspect the Gemini model group.
+      const group =
+        quota.groups.find((g) => g.short === "gem") ??
+        quota.groups.find((g) => /gemini/i.test(g.name)) ??
+        quota.groups[0];
+      if (!group) return undefined;
+      const percents: number[] = [];
+      if (typeof group.fiveHour?.usedPercent === "number") {
+        percents.push(group.fiveHour.usedPercent);
+      }
+      if (typeof group.weekly?.usedPercent === "number") {
+        percents.push(group.weekly.usedPercent);
+      }
+      return percents.length ? Math.max(...percents) : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   parse(line: string, stream: "stdout" | "stderr"): JobEvent | null {

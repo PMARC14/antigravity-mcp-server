@@ -1,4 +1,4 @@
-import type { StdinPlan } from "../jobs/stdin.js";
+import type { StdinAction, StdinPlan, StdinHandler, SteerResult } from "../jobs/stdin.js";
 import { CLI, DEFAULT_MODEL } from "../constants.js";
 import { resolveWorkingDirectory } from "./workingDirResolver.js";
 import { unlinkSync } from "fs";
@@ -96,22 +96,82 @@ export const READ_FINAL_TURN =
 export const userTurn = (content: string): string =>
   JSON.stringify({ event: "user", message: { content } }) + "\n";
 
-/** One decision per process; a retry gets a fresh handler. */
-export const readStdinPlan: StdinPlan = () => {
-  let decided = false;
-  return (line, stream) => {
-    if (decided || stream !== "stdout") return;
-    let data;
-    try { data = JSON.parse(line); } catch { return; }
-    if (data?.event !== "result" || !data.result) return;
-    decided = true;
-    const result = data.result;
-    const needsAnswer =
-      (Array.isArray(result.denied_actions) && result.denied_actions.length > 0) ||
-      typeof result.response !== "string" || !result.response.trim();
-    return { write: needsAnswer ? userTurn(READ_FINAL_TURN) : undefined, close: true };
+/**
+ * Stdin plan for agy background jobs:
+ * - Keeps stdin open while a turn is running.
+ * - Mid-work steer messages are queued as subsequent user turns on stdin.
+ * - When a turn's result event arrives and no steer is pending, closes stdin so agy exits.
+ * - When a steer arrived during the turn, stays open until the next result.
+ * - Read mode keeps its existing recovery rule and combines with steering.
+ */
+export function createAgyStdinPlan(mode: AgyMode = "read"): StdinPlan {
+  return () => {
+    let firstResultSeen = false;
+    let pendingSteers = 0;
+
+    const handler: StdinHandler = (
+      line: string,
+      stream: "stdout" | "stderr",
+    ): StdinAction | void => {
+      if (stream !== "stdout") return;
+      let data: any;
+      try {
+        data = JSON.parse(line);
+      } catch {
+        return;
+      }
+      if (data?.event !== "result" || !data.result) return;
+      const result = data.result;
+
+      if (!firstResultSeen) {
+        firstResultSeen = true;
+
+        if (mode === "read") {
+          const needsAnswer =
+            (Array.isArray(result.denied_actions) &&
+              result.denied_actions.length > 0) ||
+            typeof result.response !== "string" ||
+            !result.response.trim();
+
+          if (needsAnswer) {
+            if (pendingSteers > 0) {
+              pendingSteers++;
+              return { write: userTurn(READ_FINAL_TURN) };
+            }
+            return { write: userTurn(READ_FINAL_TURN), close: true };
+          }
+        }
+
+        if (pendingSteers > 0) {
+          return;
+        }
+
+        return { close: true };
+      }
+
+      // Subsequent results (from steer turns or recovery turns)
+      if (pendingSteers > 0) {
+        pendingSteers--;
+        if (pendingSteers === 0) {
+          return { close: true };
+        }
+        return;
+      }
+
+      return { close: true };
+    };
+
+    handler.onSteer = (message: string): SteerResult => {
+      pendingSteers++;
+      return { write: userTurn(message), delivered: "queued" };
+    };
+
+    return handler;
   };
-};
+}
+
+/** One decision per process; a retry gets a fresh handler. */
+export const readStdinPlan: StdinPlan = createAgyStdinPlan("read");
 
 export class AgyCommandBuilder {
   async build(
@@ -191,7 +251,7 @@ export class AgyCommandBuilder {
       }),
       logFile,
       stdin: userTurn(mode === "read" ? READ_PREFIX + finalPrompt : finalPrompt),
-      stdinPlan: mode === "read" ? readStdinPlan : undefined,
+      stdinPlan: createAgyStdinPlan(mode),
     };
   }
 

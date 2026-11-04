@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { AgyCommandBuilder, resolveAgyMode } from "./agyCommandBuilder.js";
+import {
+  AgyCommandBuilder,
+  resolveAgyMode,
+  createAgyStdinPlan,
+  userTurn,
+  READ_FINAL_TURN,
+} from "./agyCommandBuilder.js";
 import { DEFAULT_MODEL } from "../constants.js";
 
 const builder = new AgyCommandBuilder();
@@ -10,6 +16,7 @@ for (const mode of ["read", "write", "full"] as const) {
     const result = await builder.build(prompt, { mode });
     const first =
       JSON.stringify({ event: "user", message: { content: prompt } }) + "\n";
+    assert.ok(result.stdinPlan);
     if (mode === "read") {
       // Read mode waits for the first result before deciding on recovery.
       const lines = result.stdin.trimEnd().split("\n");
@@ -19,7 +26,6 @@ for (const mode of ["read", "write", "full"] as const) {
       const firstTurn = JSON.parse(lines[0]).message.content;
       assert.match(firstTurn, /^This is a read-only task/);
       assert.ok(firstTurn.endsWith(prompt));
-      assert.ok(result.stdinPlan);
       const settings = JSON.parse(result.args[result.args.indexOf("--settings") + 1]);
       assert.ok(settings.permissions.allow.includes("command(git diff*)"));
       assert.ok(!settings.permissions.allow.includes("command(*)"));
@@ -135,4 +141,75 @@ test("trusted mode edits and runs commands without agy's sandbox (Git Bash break
   assert.deepEqual(JSON.parse(settings), { permissions: { allow: ["command(*)"] } });
   assert.equal(resolveAgyMode({ mode: "trusted", skipPermissions: false }), "trusted");
   assert.throws(() => resolveAgyMode({ mode: "trusted", skipPermissions: true }), /conflicts/);
+});
+
+test("createAgyStdinPlan handles steer and result lifecycle", async () => {
+  const plan = createAgyStdinPlan("write");
+  const handler = plan({ apply: () => {}, emit: () => {} });
+
+  assert.ok(handler.onSteer);
+
+  // Steer before first result writes user turn, keeps stdin open, and returns queued
+  const steer1 = await handler.onSteer("steer turn 1");
+  assert.equal(steer1.delivered, "queued");
+  assert.equal(steer1.close, undefined);
+  assert.equal(steer1.write, userTurn("steer turn 1"));
+
+  // First result arrives while steer is pending -> keep stdin open
+  const r1 = handler(
+    JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "done 1" } }),
+    "stdout",
+  );
+  assert.equal(r1, undefined);
+
+  // Second result arrives (for steer turn 1) -> no steer pending -> close stdin
+  const r2 = handler(
+    JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "done 2" } }),
+    "stdout",
+  );
+  assert.deepEqual(r2, { close: true });
+});
+
+test("createAgyStdinPlan closes stdin on first result when no steer is pending", () => {
+  const plan = createAgyStdinPlan("write");
+  const handler = plan({ apply: () => {}, emit: () => {} });
+
+  const r1 = handler(
+    JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "done" } }),
+    "stdout",
+  );
+  assert.deepEqual(r1, { close: true });
+});
+
+test("createAgyStdinPlan in read mode combines recovery with steering", async () => {
+  const plan = createAgyStdinPlan("read");
+  const handler = plan({ apply: () => {}, emit: () => {} });
+
+  // Steer arrives before first result
+  const steerAction = await handler.onSteer!("do something else");
+  assert.equal(steerAction.delivered, "queued");
+
+  // First result has denied actions -> needs recovery turn, but steer is pending, so keep stdin open
+  const r1 = handler(
+    JSON.stringify({
+      event: "result",
+      result: { status: "SUCCESS", response: "denied", denied_actions: [{ action: "cmd" }] },
+    }),
+    "stdout",
+  );
+  assert.deepEqual(r1, { write: userTurn(READ_FINAL_TURN) });
+
+  // Next result arrives (one turn finished) -> still pending
+  const r2 = handler(
+    JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "turn 2 done" } }),
+    "stdout",
+  );
+  assert.equal(r2, undefined);
+
+  // Next result arrives (last turn finished) -> close stdin
+  const r3 = handler(
+    JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "turn 3 done" } }),
+    "stdout",
+  );
+  assert.deepEqual(r3, { close: true });
 });
