@@ -178,3 +178,163 @@ test("quota errors become usage_limit with best-effort reset", () => {
   const justPassed = new Date(2026, 10, 4, 17, 37, 10);
   assert.equal(agyUsageReset('try again at 5:37 PM', justPassed), justPassed.getTime() + 60000);
 });
+
+test("the quota AGY_ERROR parses status RESOURCE_EXHAUSTED and error_code 429 into usageLimit", () => {
+  const line =
+    'AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 4h57m36s.","status":"RESOURCE_EXHAUSTED","error_code":429,"code_kind":"http","retryable":true,"error_id":"test-err"}';
+  const before = Date.now();
+  const event = connector.parse(line, "stderr");
+  const after = Date.now();
+  assert.ok(event);
+  assert.equal(
+    event.error,
+    "RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 4h57m36s.",
+  );
+  assert.ok(event.usageLimit);
+  assert.ok(typeof event.usageLimit.resetAt === "number");
+  const expectedSec = 4 * 3600 + 57 * 60 + 36;
+  assert.ok(event.usageLimit.resetAt >= before + expectedSec * 1000);
+  assert.ok(event.usageLimit.resetAt <= after + expectedSec * 1000);
+
+  // ISO timestamp format resets at exact time
+  const isoLine =
+    'AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED: quota resets at 2026-11-04T23:00:00Z","status":"RESOURCE_EXHAUSTED","error_code":429}';
+  const isoEvent = connector.parse(isoLine, "stderr");
+  assert.equal(
+    isoEvent?.usageLimit?.resetAt,
+    Date.parse("2026-11-04T23:00:00Z"),
+  );
+
+  // error_code 429 without RESOURCE_EXHAUSTED status also returns usageLimit
+  const code429Line =
+    'AGY_ERROR: {"short_error":"Rate limit reached (code 429)","error_code":429}';
+  const code429Event = connector.parse(code429Line, "stderr");
+  assert.ok(code429Event?.usageLimit);
+});
+
+test("a non-quota retryable AGY_ERROR appends (retryable) and returns no usageLimit", () => {
+  const retryableLine =
+    'AGY_ERROR: {"short_error":"UNAVAILABLE (code 503): Service temporarily unavailable","status":"UNAVAILABLE","error_code":503,"retryable":true}';
+  const event = connector.parse(retryableLine, "stderr");
+  assert.deepEqual(event, {
+    error: "UNAVAILABLE (code 503): Service temporarily unavailable (retryable)",
+  });
+
+  // When retryable is false, (retryable) is not appended
+  const nonRetryableLine =
+    'AGY_ERROR: {"short_error":"INVALID_ARGUMENT (code 400): Bad argument","status":"INVALID_ARGUMENT","error_code":400,"retryable":false}';
+  const nonRetryableEvent = connector.parse(nonRetryableLine, "stderr");
+  assert.deepEqual(nonRetryableEvent, {
+    error: "INVALID_ARGUMENT (code 400): Bad argument",
+  });
+});
+
+test("the old regex path handles legacy quota errors on stderr", () => {
+  const legacyLine = "Error 429: Resource has been exhausted (quota)";
+  const legacyEvent = connector.parse(legacyLine, "stderr");
+  assert.ok(legacyEvent?.usageLimit);
+  assert.equal(legacyEvent?.error, legacyLine);
+
+  // Malformed AGY_ERROR line falls back to regex
+  const malformedLine = "AGY_ERROR: not-json quota exceeded";
+  const malformedEvent = connector.parse(malformedLine, "stderr");
+  assert.ok(malformedEvent?.usageLimit);
+
+  // Normal non-quota stderr returns null
+  assert.equal(connector.parse("Some random stderr message", "stderr"), null);
+});
+
+test("unauthenticated detect returns available false with interactive sign-in reason", async () => {
+  // Scenario A: AGY_ERROR with UNAUTHENTICATED status
+  const c1 = new AgyConnector({
+    executeCommand: async () => "agy 1.5.0",
+    runUsage: async () =>
+      'AGY_ERROR: {"short_error":"UNAUTHENTICATED (code 401): Please sign in","status":"UNAUTHENTICATED","error_code":401}',
+  });
+  const res1 = await c1.detect();
+  assert.deepEqual(res1, {
+    available: false,
+    reason: "agy is not signed in: run agy once interactively",
+  });
+
+  // Scenario B: JSON with ERROR status and response "please sign in"
+  const c2 = new AgyConnector({
+    executeCommand: async () => "agy 1.5.0",
+    runUsage: async () =>
+      JSON.stringify({ status: "ERROR", response: "please sign in" }),
+  });
+  const res2 = await c2.detect();
+  assert.deepEqual(res2, {
+    available: false,
+    reason: "agy is not signed in: run agy once interactively",
+  });
+});
+
+test("a probe timeout failing open keeps agy available", async () => {
+  const c = new AgyConnector({
+    executeCommand: async () => "agy 1.5.0",
+    runUsage: async () => {
+      throw new Error("agy /usage timed out");
+    },
+  });
+  const res = await c.detect();
+  assert.deepEqual(res, {
+    available: true,
+    version: "agy 1.5.0",
+    exe: "agy",
+  });
+});
+
+test("the cache preserves auth result for 10 minutes", async () => {
+  let fakeNow = 1000000;
+  let probeCalls = 0;
+  const c = new AgyConnector({
+    executeCommand: async () => "agy 1.5.0",
+    runUsage: async () => {
+      probeCalls++;
+      return JSON.stringify({
+        status: "SUCCESS",
+        command: { data: { groups: [{ name: "Gemini Models" }] } },
+      });
+    },
+    now: () => fakeNow,
+  });
+
+  // First detect calls probe
+  const res1 = await c.detect();
+  assert.equal(res1.available, true);
+  assert.equal(probeCalls, 1);
+
+  // 5 minutes later: still within 10 min cache TTL, probe not called again
+  fakeNow += 5 * 60 * 1000;
+  const res2 = await c.detect();
+  assert.equal(res2.available, true);
+  assert.equal(probeCalls, 1);
+
+  // 10 minutes later (15 min elapsed): cache expired, probe is called again
+  fakeNow += 10 * 60 * 1000;
+  const res3 = await c.detect();
+  assert.equal(res3.available, true);
+  assert.equal(probeCalls, 2);
+
+  // Also verify unauthenticated result is cached
+  let unauthCalls = 0;
+  let unauthNow = 2000000;
+  const cUnauth = new AgyConnector({
+    executeCommand: async () => "agy 1.5.0",
+    runUsage: async () => {
+      unauthCalls++;
+      return 'AGY_ERROR: {"status":"UNAUTHENTICATED","short_error":"not signed in"}';
+    },
+    now: () => unauthNow,
+  });
+
+  const u1 = await cUnauth.detect();
+  assert.equal(u1.available, false);
+  assert.equal(unauthCalls, 1);
+
+  unauthNow += 5 * 60 * 1000;
+  const u2 = await cUnauth.detect();
+  assert.equal(u2.available, false);
+  assert.equal(unauthCalls, 1);
+});

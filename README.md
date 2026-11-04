@@ -128,6 +128,12 @@ Background records stay in `~/.agy-mcp/bg/`. New records keep the full prompt in
 
 Shared jobs use `~/.agent-jobs` (overridable with `AGENT_JOBS_HOME`). Opt in to metadata-only job stop notifications with `AGENT_JOBS_CHANNEL=1`; Claude Code must be launched with `claude-agents` (`claude --dangerously-load-development-channels server:codex server:agy`). `agy_usage` runs `agy -p /usage --output-format json`.
 
+## MCP tasks (no launch flag)
+
+Task-enabled Claude Code clients can show `agy_job_start` and `agy_job_watch` in `/tasks` immediately and wake the model when they finish, without a channel environment variable or development-channel launch flag. Client task and wake feature gates still apply. The server supports both the 2026-07-28 tasks extension (`server/discover`, per-request `_meta` client capabilities, `resultType: "task"`) and the 2025-11-25 `task: {}` parameter.
+
+Task IDs are job IDs, retained across reconnects. Task watch adopts an existing job immediately and follows pauses and retries independently of `maxWaitSec`; its final payload is `agy_job_result`. Use `tasks/get`, `tasks/list`, `tasks/result`, and `tasks/cancel` to inspect, list, await, or stop tasks. Cancelling a result wait or disconnecting leaves running jobs intact. Ordinary calls keep the watch behavior below; optional channels remain available separately.
+
 ## Watching jobs and sending follow-ups
 
 `agy_job_watch` keeps the MCP call pending until the job completes, fails, is killed, pauses, or is lost, or the wait expires. Pass `jobId` and optional `maxWaitSec` (default 1,800, maximum 7,200); the result includes `watchedSec` and `timedOut`. With a client progress token, local state changes report immediately and a heartbeat reports at least every 20 seconds. Messages look like `running | 42s | last event or step summary`, on one line and capped at 120 characters. Heartbeats read only metadata and the stdout tail, without starting processes or probing liveness; other servers' changes appear on the next heartbeat. No token means no notifications. A timeout returns `timedOut: true`; cancelling or disconnecting ends the wait while running jobs continue and save their results. In Claude Code, the pending call becomes a background task after two minutes, showing the latest progress and delivering the result when it settles.

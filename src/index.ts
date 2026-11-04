@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -19,6 +18,7 @@ import {
   Prompt,
   GetPromptResult,
   CallToolResult,
+  CreateTaskResult,
 } from "@modelcontextprotocol/sdk/types.js";
 import { Logger } from "./utils/logger.js";
 import { PROTOCOL, ToolArguments } from "./constants.js";
@@ -34,6 +34,11 @@ import {
 import { getCompletionValues } from "./utils/completions.js";
 import { SERVER_VERSION } from "./version.js";
 import { executeJobWatch } from "./tools/job-watch-progress.js";
+import {
+  registerMcpTasks,
+  TaskStdioTransport,
+  taskCapabilities,
+} from "./tools/mcp-tasks.js";
 
 import {
   startChannelNotifier,
@@ -43,6 +48,13 @@ import {
 
 const CHANNEL_INSTRUCTIONS = withChannelInstructions(undefined, "agy");
 let stopChannel = () => {};
+const capabilities = withChannelCapabilities({
+  tools: {},
+  prompts: {},
+  logging: {},
+  completions: {},
+  tasks: taskCapabilities,
+});
 
 const server = new Server(
   {
@@ -50,15 +62,14 @@ const server = new Server(
     version: SERVER_VERSION,
   },
   {
-    capabilities: withChannelCapabilities({
-      tools: {},
-      prompts: {},
-      logging: {},
-      completions: {},
-    }),
+    capabilities,
     ...(CHANNEL_INSTRUCTIONS ? { instructions: CHANNEL_INSTRUCTIONS } : {}),
   },
 );
+const mcpTasks = registerMcpTasks(server, "agy", agyJobManager, {
+  capabilities,
+  instructions: CHANNEL_INSTRUCTIONS,
+});
 
 async function sendProgressNotification(
   progressToken: string | number | undefined,
@@ -178,8 +189,15 @@ server.setRequestHandler(
 
 server.setRequestHandler(
   CallToolRequestSchema,
-  async (request: CallToolRequest, extra): Promise<CallToolResult> => {
+  async (
+    request: CallToolRequest,
+    extra,
+  ): Promise<CallToolResult | CreateTaskResult> => {
     const toolName: string = request.params.name;
+
+    if (request.params.task !== undefined) {
+      return mcpTasks.call(toolName, request.params.arguments || {});
+    }
 
     if (toolExists(toolName)) {
       const progressToken = (request.params as any)._meta?.progressToken;
@@ -288,9 +306,10 @@ server.setRequestHandler(
 async function main() {
   Logger.debug("init antigravity-mcp-server");
   await agyJobManager.initialize();
-  const transport = new StdioServerTransport();
+  const transport = new TaskStdioTransport("agy");
   server.onclose = () => {
     stopChannel();
+    mcpTasks.close();
     // The SDK aborts in-flight requests. Job processes and their queue keep running;
     // their open pipes keep this server alive until their results have been saved.
   };
@@ -314,6 +333,7 @@ async function main() {
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
     stopChannel();
+    mcpTasks.close();
     void agyJobManager.dispose().finally(() => process.exit(0));
   });
 }

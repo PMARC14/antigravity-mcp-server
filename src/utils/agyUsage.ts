@@ -124,18 +124,20 @@ export const runAgyUsage: UsageRunner = (timeoutMs) =>
       { stdio: ["ignore", "pipe", "pipe"] },
     );
     let out = "";
+    let err = "";
     const timer = setTimeout(() => {
       child.kill();
       reject(new Error("agy /usage timed out"));
     }, timeoutMs);
     child.stdout?.on("data", (chunk) => (out += chunk));
+    child.stderr?.on("data", (chunk) => (err += chunk));
     child.on("error", (error) => {
       clearTimeout(timer);
       reject(error);
     });
     child.on("close", () => {
       clearTimeout(timer);
-      resolveRun(out);
+      resolveRun(out || err);
     });
   });
 

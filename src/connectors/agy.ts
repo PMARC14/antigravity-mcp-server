@@ -4,6 +4,7 @@ import { AgyCommandBuilder, AgyEffort } from "../utils/agyCommandBuilder.js";
 import { executeCommand } from "../utils/commandExecutor.js";
 import { fetchModels } from "../utils/modelList.js";
 import { CLI, DEFAULT_MODEL, MODELS, REVIEW_MODEL } from "../constants.js";
+import { runAgyUsage, type UsageRunner } from "../utils/agyUsage.js";
 
 const QUOTA_PATTERN =
   /quota|rate[ _-]?limit|resource[ _]exhausted|exhausted|usage limit|\b429\b/i;
@@ -11,7 +12,7 @@ const DENIED_PATTERN = /no output produced.*auto-denied/i;
 
 // Vendor-neutral reset formats, including minute-precision local clocks.
 export { usageReset as agyUsageReset } from "../jobs/usage-reset.js";
-import { usageLimit } from "../jobs/usage-reset.js";
+import { usageLimit, usageReset as agyUsageReset } from "../jobs/usage-reset.js";
 
 function quotaEvent(message: string): JobEvent {
   return {
@@ -20,26 +21,160 @@ function quotaEvent(message: string): JobEvent {
   };
 }
 
+export function isUnauthenticated(raw: string): boolean {
+  if (!raw) return false;
+  const trimmed = raw.trim();
+  if (!trimmed) return false;
+
+  for (const line of trimmed.split("\n")) {
+    const t = line.trim();
+    if (t.startsWith("AGY_ERROR:")) {
+      try {
+        const data = JSON.parse(t.slice("AGY_ERROR:".length).trim());
+        if (
+          String(data?.status).toUpperCase() === "UNAUTHENTICATED" ||
+          data?.error_code === 401 ||
+          data?.error_code === "401"
+        ) {
+          return true;
+        }
+        const text = `${data?.short_error ?? ""} ${data?.error ?? ""}`;
+        if (
+          /unauthenticated|not authenticated|sign[ -]?in|login|unauthorized|\b401\b/i.test(
+            text,
+          )
+        ) {
+          return true;
+        }
+      } catch {
+        /* fall through */
+      }
+    }
+  }
+
+  try {
+    const data = JSON.parse(trimmed);
+    if (
+      String(data?.status).toUpperCase() === "UNAUTHENTICATED" ||
+      data?.error_code === 401 ||
+      data?.error_code === "401" ||
+      data?.code === 401
+    ) {
+      return true;
+    }
+    const text = `${data?.response ?? ""} ${data?.error ?? ""} ${data?.message ?? ""} ${data?.short_error ?? ""}`;
+    if (
+      /unauthenticated|not authenticated|sign[ -]?in|login|unauthorized|\b401\b/i.test(
+        text,
+      )
+    ) {
+      return true;
+    }
+  } catch {
+    /* not JSON */
+  }
+
+  if (
+    /unauthenticated|not authenticated|not signed in|please sign in|sign in again|\b401\b/i.test(
+      trimmed,
+    )
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+export interface AgyConnectorOptions {
+  runUsage?: UsageRunner;
+  executeCommand?: (
+    command: string,
+    args: string[],
+    onProgress?: (newOutput: string) => void,
+    timeoutMs?: number,
+  ) => Promise<string>;
+  now?: () => number;
+  authCacheTtlMs?: number;
+}
+
 export class AgyConnector implements Connector {
   readonly id = "agy";
   readonly defaultModel = DEFAULT_MODEL;
   readonly reviewModel = REVIEW_MODEL;
   private readonly builder = new AgyCommandBuilder();
+  private readonly runUsage: UsageRunner;
+  private readonly executeCmd: (
+    command: string,
+    args: string[],
+    onProgress?: (newOutput: string) => void,
+    timeoutMs?: number,
+  ) => Promise<string>;
+  private readonly now: () => number;
+  private readonly authCacheTtlMs: number;
+  private authCache?: { authenticated: boolean; timestamp: number };
+
+  constructor(options: AgyConnectorOptions = {}) {
+    this.runUsage = options.runUsage ?? runAgyUsage;
+    this.executeCmd = options.executeCommand ?? executeCommand;
+    this.now = options.now ?? Date.now;
+    this.authCacheTtlMs = options.authCacheTtlMs ?? 10 * 60 * 1000;
+  }
+
+  clearAuthCache(): void {
+    this.authCache = undefined;
+  }
 
   async detect(): ReturnType<Connector['detect']> {
+    let version = "";
     try {
-      const version = (
-        await executeCommand(CLI.COMMANDS.AGY, ["--version"], undefined, 5000)
+      version = (
+        await this.executeCmd(CLI.COMMANDS.AGY, ["--version"], undefined, 5000)
       ).trim();
-      if (version) return { available: true, version, exe: CLI.COMMANDS.AGY };
     } catch {
       /* fall through */
     }
-    return {
-      available: false,
-      reason:
-        "Antigravity CLI not found or not runnable - install `agy` and run it once interactively to sign in",
-    };
+    if (!version) {
+      return {
+        available: false,
+        reason:
+          "Antigravity CLI not found or not runnable - install `agy` and run it once interactively to sign in",
+      };
+    }
+
+    const now = this.now();
+    if (this.authCache && now - this.authCache.timestamp < this.authCacheTtlMs) {
+      if (!this.authCache.authenticated) {
+        return {
+          available: false,
+          reason: "agy is not signed in: run agy once interactively",
+        };
+      }
+      return { available: true, version, exe: CLI.COMMANDS.AGY };
+    }
+
+    try {
+      const probeOutput = await this.runUsage(5000);
+      if (isUnauthenticated(probeOutput)) {
+        this.authCache = { authenticated: false, timestamp: now };
+        return {
+          available: false,
+          reason: "agy is not signed in: run agy once interactively",
+        };
+      }
+      this.authCache = { authenticated: true, timestamp: now };
+      return { available: true, version, exe: CLI.COMMANDS.AGY };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (isUnauthenticated(msg)) {
+        this.authCache = { authenticated: false, timestamp: now };
+        return {
+          available: false,
+          reason: "agy is not signed in: run agy once interactively",
+        };
+      }
+      // A failed probe for other reasons, like a timeout, must not mark agy unavailable: fail open.
+      return { available: true, version, exe: CLI.COMMANDS.AGY };
+    }
   }
 
   async models(): Promise<string[]> {
@@ -75,6 +210,40 @@ export class AgyConnector implements Connector {
 
   parse(line: string, stream: "stdout" | "stderr"): JobEvent | null {
     if (stream === "stderr") {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("AGY_ERROR:")) {
+        try {
+          const payload = trimmed.slice("AGY_ERROR:".length).trim();
+          const data = JSON.parse(payload);
+          const shortError =
+            typeof data?.short_error === "string"
+              ? data.short_error
+              : typeof data?.error === "string"
+                ? data.error
+                : payload;
+          if (
+            String(data?.status).toUpperCase() === "RESOURCE_EXHAUSTED" ||
+            data?.error_code === 429 ||
+            data?.error_code === "429"
+          ) {
+            return {
+              error: shortError,
+              usageLimit: {
+                ...usageLimit(shortError),
+                resetAt: agyUsageReset(shortError),
+              },
+            };
+          }
+          const isRetryable = Boolean(
+            data?.retryable === true || data?.retryable === "true",
+          );
+          return {
+            error: isRetryable ? `${shortError} (retryable)` : shortError,
+          };
+        } catch {
+          /* malformed AGY_ERROR json: fall through to regex */
+        }
+      }
       if (DENIED_PATTERN.test(line)) return { error: line.trim() };
       return QUOTA_PATTERN.test(line) ? quotaEvent(line.trim()) : null;
     }
