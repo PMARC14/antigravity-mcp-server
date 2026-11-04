@@ -37,6 +37,7 @@ export interface UnifiedTool {
   execute: (
     args: ToolArguments,
     onProgress?: (newOutput: string) => void,
+    signal?: AbortSignal,
   ) => Promise<ToolExecuteResult>;
   category?: "simple" | "utility" | "agy";
 }
@@ -97,12 +98,13 @@ export async function executeTool(
   toolName: string,
   args: ToolArguments,
   onProgress?: (newOutput: string) => void,
+  signal?: AbortSignal,
 ): Promise<ToolExecuteResult> {
   const tool = toolRegistry.find((t) => t.name === toolName);
   if (!tool) throw new Error(`Unknown tool: ${toolName}`);
   try {
     const validatedArgs = tool.zodSchema.parse(args);
-    return tool.execute(validatedArgs, onProgress);
+    return tool.execute(validatedArgs, onProgress, signal);
   } catch (error) {
     if (error instanceof ZodError) {
       const issues = error.issues

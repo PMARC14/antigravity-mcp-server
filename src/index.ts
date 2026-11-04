@@ -33,6 +33,7 @@ import {
 } from "./tools/index.js";
 import { getCompletionValues } from "./utils/completions.js";
 import { SERVER_VERSION } from "./version.js";
+import { executeJobWatch } from "./tools/job-watch-progress.js";
 
 import {
   startChannelNotifier,
@@ -177,23 +178,43 @@ server.setRequestHandler(
 
 server.setRequestHandler(
   CallToolRequestSchema,
-  async (request: CallToolRequest): Promise<CallToolResult> => {
+  async (request: CallToolRequest, extra): Promise<CallToolResult> => {
     const toolName: string = request.params.name;
 
     if (toolExists(toolName)) {
       const progressToken = (request.params as any)._meta?.progressToken;
-      const progressData = startProgressUpdates(toolName, progressToken);
+      const watching = toolName === "agy_job_watch";
+      const progressData = watching
+        ? undefined
+        : startProgressUpdates(toolName, progressToken);
 
       try {
         const args: ToolArguments =
           (request.params.arguments as ToolArguments) || {};
         Logger.toolInvocation(toolName, request.params.arguments);
 
-        const result = await executeTool(toolName, args, (newOutput) => {
-          if (progressData.state) progressData.state.latestOutput = newOutput;
-        });
+        const result = watching
+          ? await executeJobWatch(toolName, args, {
+              progressToken,
+              signal: extra.signal,
+              notify: (params) =>
+                extra.sendNotification({
+                  method: PROTOCOL.NOTIFICATIONS.PROGRESS,
+                  params,
+                }),
+            })
+          : await executeTool(
+              toolName,
+              args,
+              (newOutput) => {
+                if (progressData?.state) {
+                  progressData.state.latestOutput = newOutput;
+                }
+              },
+              extra.signal,
+            );
 
-        stopProgressUpdates(progressData, true);
+        if (progressData) stopProgressUpdates(progressData, true);
 
         if (typeof result === "string") {
           return {
@@ -207,7 +228,7 @@ server.setRequestHandler(
           isError: false,
         } as CallToolResult;
       } catch (error) {
-        stopProgressUpdates(progressData, false);
+        if (progressData) stopProgressUpdates(progressData, false);
         Logger.error(`Error in tool '${toolName}':`, error);
         const errorMessage =
           error instanceof Error ? error.message : String(error);
@@ -268,12 +289,25 @@ async function main() {
   Logger.debug("init antigravity-mcp-server");
   await agyJobManager.initialize();
   const transport = new StdioServerTransport();
-  await server.connect(transport);
-  stopChannel = startChannelNotifier(agyJobManager, server, "agy", Logger);
   server.onclose = () => {
     stopChannel();
-    void agyJobManager.dispose();
+    // The SDK aborts in-flight requests. Job processes and their queue keep running;
+    // their open pipes keep this server alive until their results have been saved.
   };
+  let disconnected = false;
+  const disconnect = () => {
+    if (disconnected) return;
+    disconnected = true;
+    void server
+      .close()
+      .catch((error) => Logger.error("Failed to close MCP transport:", error));
+  };
+  // The stdio transport does not close itself on EOF or a broken output pipe.
+  process.stdin.once("end", disconnect);
+  process.stdin.once("close", disconnect);
+  process.stdout.once("error", disconnect);
+  await server.connect(transport);
+  stopChannel = startChannelNotifier(agyJobManager, server, "agy", Logger);
   Logger.debug("antigravity-mcp-server listening on stdio");
 }
 

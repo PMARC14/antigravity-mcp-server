@@ -56,6 +56,7 @@ claude mcp add antigravity -- npx -y @trishchuk/antigravity-mcp-server
 | `bg-antigravity`                     | Detached background tasks: start / status / tail / stop / remove / list. State persists in `~/.agy-mcp/bg/` across server restarts.                     |
 | `delegate-antigravity`               | Delegate an implementation task into an isolated git worktree; poll status, then `collect` the diff for selective review.                               |
 | `agy_job_start`, `agy_job_status`, `agy_job_result`, `agy_job_cancel` | Start, inspect, retrieve or cancel shared background jobs. |
+| `agy_job_watch`, `agy_job_send` | Wait with progress or send a follow-up to a stopped job's session. |
 | `agy_job_list`, `agy_job_read`, `agy_job_requeue` | List jobs, read saved files or requeue a stopped job. |
 | `agy_worktree_collect` | Save a worktree patch and optionally remove the worktree or branch. |
 | `agy_usage` | Query agy usage limits without a model turn. |
@@ -124,6 +125,12 @@ The existing execution tools accept `effort` (low, medium, high, xhigh, max) and
 Background records stay in `~/.agy-mcp/bg/`. New records keep the full prompt in a separate file and stdout/stderr separately; old records remain readable. Tasks whose process disappeared without a recorded exit have unknown status. Delegate collection stages all changes, saves a binary-capable patch against the starting SHA, and returns at most 20k characters per output plus the patch path before optional cleanup.
 
 Shared jobs use `~/.agent-jobs` (overridable with `AGENT_JOBS_HOME`). Opt in to metadata-only job stop notifications with `AGENT_JOBS_CHANNEL=1`; Claude Code must be launched with `claude-agents` (`claude --dangerously-load-development-channels server:codex server:agy`). `agy_usage` runs `agy -p /usage --output-format json`.
+
+## Watching jobs and sending follow-ups
+
+`agy_job_watch` keeps the MCP call pending until the job completes, fails, is killed, pauses, or is lost, or the wait expires. Pass `jobId` and optional `maxWaitSec` (default 1,800, maximum 7,200); the result includes `watchedSec` and `timedOut`. With a client progress token, local state changes report immediately and a heartbeat reports at least every 20 seconds. Messages look like `running | 42s | last event or step summary`, on one line and capped at 120 characters. Heartbeats read only metadata and the stdout tail, without starting processes or probing liveness; other servers' changes appear on the next heartbeat. No token means no notifications. A timeout returns `timedOut: true`; cancelling or disconnecting ends the wait while running jobs continue and save their results. In Claude Code, the pending call becomes a background task after two minutes, showing the latest progress and delivering the result when it settles.
+
+`agy_job_send` takes `jobId` and `message` for a stopped job (`completed`, `failed`, `killed`, `paused`, or `lost`) with a `sessionId` and confirmed process cleanup. It starts a new job in that native CLI session and returns `{ jobId, state, followUpOf }`. Connector, mode, model, effort, timeout, and an existing worktree are inherited; optional `mode`, `model`, `effort`, and `timeoutMin` override settings. If the worktree is gone, it uses the original working directory (repository root for older records). Follow-ups share the queue, usage budgets, and machine-wide slot limit; another connector's follow-up waits for that server. Sending to a paused job supersedes automatic retry while preserving the connector's quota pause. For running or queued jobs, watch until stopped or cancel before sending.
 
 ## Development
 

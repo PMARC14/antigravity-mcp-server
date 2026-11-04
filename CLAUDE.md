@@ -35,6 +35,12 @@ The existing ask, digest, review, plan and brainstorm tools default to read; bac
 
 The shared tools are `agy_job_start`, `agy_job_status`, `agy_job_result`, `agy_job_cancel`, `agy_job_list`, `agy_job_read`, `agy_job_requeue` and `agy_worktree_collect`. Jobs share `~/.agent-jobs` with the Codex fork; `AGENT_JOBS_HOME` overrides it. `agy_usage` runs `agy -p /usage --output-format json` without a model turn. Set `AGENT_JOBS_CHANNEL=1` in the MCP registration to opt in to metadata-only stop notifications; Claude Code must be launched with `claude-agents` (`claude --dangerously-load-development-channels server:codex server:agy`).
 
+## Watching jobs and sending follow-ups
+
+`agy_job_watch` keeps its MCP call pending until the job completes, fails, is killed, pauses, or is lost, or the wait expires. `maxWaitSec` defaults to 1,800 and is capped at 7,200; the result includes `watchedSec` and `timedOut`. With a progress token, it reports local state changes immediately and sends a heartbeat at least every 20 seconds, using one-line messages like `running | 42s | last event or step summary` capped at 120 characters. The heartbeat reads metadata and the stdout tail without starting a process or probing liveness; changes from other servers appear on the next heartbeat. Without a token it sends no notifications. Timeout returns `timedOut: true`; cancellation ends only the wait. Disconnect also ends the watch while running jobs continue and save results. In Claude Code, the pending call becomes a background task after two minutes, showing the latest progress and delivering the result when it settles.
+
+`agy_job_send` requires a stopped job (`completed`, `failed`, `killed`, `paused`, or `lost`) with a `sessionId` and confirmed process cleanup. It starts a new job with `message` as its prompt, resumes the native CLI session, and returns `{ jobId, state, followUpOf }`. It inherits connector, mode, model, effort, timeout, and an existing worktree; `mode`, `model`, `effort`, and `timeoutMin` can override settings. A removed or missing worktree falls back to the original working directory (repository root for older records). Follow-ups share the queue, usage budgets, and machine-wide slot limit; another connector's job waits for its server. Sending to a paused job supersedes its automatic retry while preserving the connector's quota pause. Watch or cancel running/queued jobs before sending.
+
 ## Conventions
 
 - ESM (`"type": "module"`), Node16 module resolution; relative imports need `.js` extensions.
