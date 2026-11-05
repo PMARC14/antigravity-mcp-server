@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import spawn from "cross-spawn";
-import { readFileSync } from "node:fs";
+import { readFileSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { fixture, meta, until } from "../jobs/test-helpers.js";
 import { JobStore } from "../jobs/store.js";
@@ -445,6 +445,39 @@ test("failed and lost jobs map to failed, and pause without reset remains workin
       if (state === "paused")
         assert.match(task.statusMessage, /reset time unknown/);
     }
+  } finally {
+    await s.cleanup();
+    s.f.cleanup();
+  }
+});
+
+test("task statusMessage hides reasoning text and does not leak it", async () => {
+  const s = await setup();
+  try {
+    const taskId = "task-reasoning-test";
+    s.store.create(
+      meta(s.f.home, {
+        id: taskId,
+        connector: "agy",
+        state: "running",
+      }),
+      "fake",
+    );
+    appendFileSync(
+      s.store.path(taskId, "stdout"),
+      JSON.stringify({
+        item: {
+          type: "reasoning",
+          text: "secret internal thinking process that should not leak",
+        },
+      }) + "\n",
+    );
+    const task = await s.rpc("tasks/get", { taskId });
+    assert.ok(
+      !task.statusMessage.includes("secret internal thinking process"),
+      `statusMessage leaked reasoning: ${task.statusMessage}`,
+    );
+    assert.match(task.statusMessage, /\breasoning\b/);
   } finally {
     await s.cleanup();
     s.f.cleanup();

@@ -72,6 +72,12 @@ export function resolveAgyMode(
   return mode;
 }
 
+/** Read-only tool permissions allowed in headless runs to prevent aborting on reads. */
+export const FILE_READ_PERMISSIONS = [
+  "read_file(*)",
+  "list_dir(*)",
+];
+
 /** Read-only commands a read-mode run may use without a prompt. */
 export const READ_ONLY_COMMANDS = [
   "command(git status*)",
@@ -113,6 +119,12 @@ export function createAgyStdinPlan(mode: AgyMode = "read"): StdinPlan {
       line: string,
       stream: "stdout" | "stderr",
     ): StdinAction | void => {
+      if (stream === "stderr") {
+        if (line.startsWith("AGY_ERROR:")) {
+          return { close: true };
+        }
+        return;
+      }
       if (stream !== "stdout") return;
       let data: any;
       try {
@@ -200,7 +212,7 @@ export class AgyCommandBuilder {
       if (mode === "write") args.push(CLI.FLAGS.SANDBOX);
       args.push(
         "--settings",
-        JSON.stringify({ permissions: { allow: ["command(*)"] } }),
+        JSON.stringify({ permissions: { allow: [...FILE_READ_PERMISSIONS, "command(*)"] } }),
       );
     } else {
       // A denied command aborts a headless run with no output, so plan mode
@@ -209,7 +221,7 @@ export class AgyCommandBuilder {
         CLI.FLAGS.MODE,
         "plan",
         "--settings",
-        JSON.stringify({ permissions: { allow: READ_ONLY_COMMANDS } }),
+        JSON.stringify({ permissions: { allow: [...FILE_READ_PERMISSIONS, ...READ_ONLY_COMMANDS] } }),
       );
     }
     if (options.effort) args.push(CLI.FLAGS.EFFORT, options.effort);

@@ -18,6 +18,7 @@ import type { ToolArguments } from "../constants.js";
 import type { JobManager } from "../jobs/manager.js";
 import type { JobMeta } from "../jobs/connector.js";
 import { atomicWrite, terminal } from "../jobs/store.js";
+import { progressMessage } from "../jobs/watch.js";
 import { toolRegistry, executeTool } from "./registry.js";
 
 export const TASK_EXTENSION = "io.modelcontextprotocol/tasks";
@@ -140,38 +141,7 @@ export function registerMcpTasks(
     if (job.state === "completed") status = "completed";
     if (job.state === "failed" || job.state === "lost") status = "failed";
     if (job.state === "killed") status = "cancelled";
-    // Match job_watch's bounded progress line without probing process liveness.
-    const line = manager.store
-      .tail(job.id, "stdout", 20)
-      .slice(-10000)
-      .trim()
-      .split(/\r?\n/)
-      .pop();
-    let summary = line ?? "";
-    try {
-      const event = JSON.parse(summary);
-      const text =
-        event.item?.text ??
-        event.item?.summary ??
-        event.summary ??
-        event.message ??
-        event.type;
-      if (typeof text === "string") summary = text;
-    } catch {
-      /* A plain text step summary is valid too. */
-    }
-    const elapsed = Math.max(
-      0,
-      Math.floor(
-        ((job.finishedAt ?? Date.now()) - (job.startedAt ?? job.createdAt)) /
-          1000,
-      ),
-    );
-    let statusMessage =
-      `${job.state} | ${elapsed}s${summary ? ` | ${summary.replace(/\s+/g, " ").trim()}` : ""}`.slice(
-        0,
-        120,
-      );
+    let statusMessage = progressMessage(manager, job);
     if (job.state === "paused")
       statusMessage = job.resetAt
         ? `Paused until ${new Date(job.resetAt).toISOString()}`

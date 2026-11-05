@@ -143,17 +143,40 @@ async function executeOnce(
       apply: (action) => updateStdin(childProcess.stdin, action),
       emit: () => {},
     });
-    const decoder = new StringDecoder("utf8");
-    let inputBuffer = "";
-    const feedInput = (chunk: string, flush = false) => {
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
+    let stdoutBuffer = "";
+    let stderrBuffer = "";
+    const feedInput = (
+      chunk: string,
+      stream: "stdout" | "stderr",
+      flush = false,
+    ) => {
       if (!inputHandler) return;
-      inputBuffer += chunk;
-      const lines = inputBuffer.split("\n");
-      inputBuffer = lines.pop()!;
-      if (flush && inputBuffer) { lines.push(inputBuffer); inputBuffer = ""; }
-      for (const line of lines) {
-        const action = inputHandler(line.replace(/\r$/, ""), "stdout");
-        if (action) updateStdin(childProcess.stdin, action);
+      if (stream === "stdout") {
+        stdoutBuffer += chunk;
+        const lines = stdoutBuffer.split("\n");
+        stdoutBuffer = lines.pop()!;
+        if (flush && stdoutBuffer) {
+          lines.push(stdoutBuffer);
+          stdoutBuffer = "";
+        }
+        for (const line of lines) {
+          const action = inputHandler(line.replace(/\r$/, ""), "stdout");
+          if (action) updateStdin(childProcess.stdin, action);
+        }
+      } else {
+        stderrBuffer += chunk;
+        const lines = stderrBuffer.split("\n");
+        stderrBuffer = lines.pop()!;
+        if (flush && stderrBuffer) {
+          lines.push(stderrBuffer);
+          stderrBuffer = "";
+        }
+        for (const line of lines) {
+          const action = inputHandler(line.replace(/\r$/, ""), "stderr");
+          if (action) updateStdin(childProcess.stdin, action);
+        }
       }
     };
     const closeInput = () => {
@@ -188,13 +211,14 @@ async function executeOnce(
         }
         return;
       }
-      feedInput(decoder.write(data));
+      feedInput(stdoutDecoder.write(data), "stdout");
       stdoutChunks.push(data);
       totalStdoutBytes += data.length;
       if (onProgress) onProgress(data.toString("utf8"));
     });
 
     childProcess.stderr?.on("data", (data: Buffer) => {
+      feedInput(stderrDecoder.write(data), "stderr");
       stderrChunks.push(data);
     });
 
@@ -231,7 +255,8 @@ async function executeOnce(
         closeInput();
         clearTimeout(timeoutId);
 
-        feedInput(decoder.end(), true);
+        feedInput(stdoutDecoder.end(), "stdout", true);
+        feedInput(stderrDecoder.end(), "stderr", true);
         const stdout = Buffer.concat(stdoutChunks).toString("utf8");
         const stderr =
           Buffer.concat(stderrChunks).toString("utf8") ||

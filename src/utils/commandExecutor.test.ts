@@ -216,3 +216,28 @@ test("a retried read process gets a fresh first-result decision", async t => {
   assert.equal(attempts, 2);
   assert.equal(result.ok, true);
 });
+
+test("a fake agy that writes AGY_ERROR to stderr and waits on stdin finishes promptly", async t => {
+  let stdinClosed = false;
+  fakeSpawn(t, child => {
+    const input = child.stdin as PassThrough;
+    input.read();
+    input.on("finish", () => {
+      stdinClosed = true;
+      child.emit("close", 1, null);
+    });
+    child.stderr!.emit(
+      "data",
+      Buffer.from(
+        'AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED: quota reached","status":"RESOURCE_EXHAUSTED"}\n',
+      ),
+    );
+  });
+  const result = await executeCommandDetailed("fixture", [], {
+    stdin: "first\n",
+    stdinPlan: readStdinPlan,
+    timeoutMs: 50,
+  });
+  assert.equal(stdinClosed, true);
+  assert.equal(result.timedOut, false);
+});

@@ -55,7 +55,7 @@ for (const mode of ["read", "write", "full"] as const) {
     if (mode === "write") {
       assert.equal(
         result.args[result.args.indexOf("--settings") + 1],
-        '{"permissions":{"allow":["command(*)"]}}',
+        '{"permissions":{"allow":["read_file(*)","list_dir(*)","command(*)"]}}',
       );
     }
   });
@@ -138,9 +138,21 @@ test("trusted mode edits and runs commands without agy's sandbox (Git Bash break
   assert.equal(result.args.includes("--sandbox"), false);
   assert.equal(result.args.includes("--dangerously-skip-permissions"), false);
   const settings = result.args[result.args.indexOf("--settings") + 1];
-  assert.deepEqual(JSON.parse(settings), { permissions: { allow: ["command(*)"] } });
+  assert.deepEqual(JSON.parse(settings), { permissions: { allow: ["read_file(*)", "list_dir(*)", "command(*)"] } });
   assert.equal(resolveAgyMode({ mode: "trusted", skipPermissions: false }), "trusted");
   assert.throws(() => resolveAgyMode({ mode: "trusted", skipPermissions: true }), /conflicts/);
+});
+
+test("settings JSON contains read_file(*) and list_dir(*) in read, write, and trusted modes", async () => {
+  for (const mode of ["read", "write", "trusted"] as const) {
+    const result = await builder.build("test", { mode });
+    const settingsIdx = result.args.indexOf("--settings");
+    assert.ok(settingsIdx !== -1, `Mode ${mode} must include --settings`);
+    const settings = JSON.parse(result.args[settingsIdx + 1]);
+    const allow: string[] = settings?.permissions?.allow ?? [];
+    assert.ok(allow.includes("read_file(*)"), `Mode ${mode} must allow read_file(*)`);
+    assert.ok(allow.includes("list_dir(*)"), `Mode ${mode} must allow list_dir(*)`);
+  }
 });
 
 test("createAgyStdinPlan handles steer and result lifecycle", async () => {
@@ -212,4 +224,13 @@ test("createAgyStdinPlan in read mode combines recovery with steering", async ()
     "stdout",
   );
   assert.deepEqual(r3, { close: true });
+});
+
+test("createAgyStdinPlan closes stdin when stderr line starts with AGY_ERROR:", () => {
+  for (const mode of ["read", "write", "trusted", "full"] as const) {
+    const plan = createAgyStdinPlan(mode);
+    const handler = plan({ apply: () => {}, emit: () => {} });
+    const action = handler('AGY_ERROR: {"status":"RESOURCE_EXHAUSTED"}', "stderr");
+    assert.deepEqual(action, { close: true }, `Mode ${mode} must close stdin on AGY_ERROR`);
+  }
 });

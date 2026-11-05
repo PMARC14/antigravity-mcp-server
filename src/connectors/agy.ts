@@ -55,6 +55,15 @@ export function isUnauthenticated(raw: string): boolean {
   try {
     const data = JSON.parse(trimmed);
     if (
+      String(data?.status).toUpperCase() === "SUCCESS" ||
+      data?.command?.data?.groups ||
+      data?.groups ||
+      data?.quotaGroups ||
+      data?.quota_groups
+    ) {
+      return false;
+    }
+    if (
       String(data?.status).toUpperCase() === "UNAUTHENTICATED" ||
       data?.error_code === 401 ||
       data?.error_code === "401" ||
@@ -70,6 +79,7 @@ export function isUnauthenticated(raw: string): boolean {
     ) {
       return true;
     }
+    return false;
   } catch {
     /* not JSON */
   }
@@ -95,6 +105,7 @@ export interface AgyConnectorOptions {
   ) => Promise<string>;
   now?: () => number;
   authCacheTtlMs?: number;
+  negativeAuthCacheTtlMs?: number;
 }
 
 export class AgyConnector implements Connector {
@@ -111,6 +122,7 @@ export class AgyConnector implements Connector {
   ) => Promise<string>;
   private readonly now: () => number;
   private readonly authCacheTtlMs: number;
+  private readonly negativeAuthCacheTtlMs: number;
   private authCache?: { authenticated: boolean; timestamp: number };
 
   constructor(options: AgyConnectorOptions = {}) {
@@ -118,6 +130,7 @@ export class AgyConnector implements Connector {
     this.executeCmd = options.executeCommand ?? executeCommand;
     this.now = options.now ?? Date.now;
     this.authCacheTtlMs = options.authCacheTtlMs ?? 10 * 60 * 1000;
+    this.negativeAuthCacheTtlMs = options.negativeAuthCacheTtlMs ?? 60 * 1000;
   }
 
   clearAuthCache(): void {
@@ -142,14 +155,19 @@ export class AgyConnector implements Connector {
     }
 
     const now = this.now();
-    if (this.authCache && now - this.authCache.timestamp < this.authCacheTtlMs) {
-      if (!this.authCache.authenticated) {
-        return {
-          available: false,
-          reason: "agy is not signed in: run agy once interactively",
-        };
+    if (this.authCache) {
+      const ttl = this.authCache.authenticated
+        ? this.authCacheTtlMs
+        : this.negativeAuthCacheTtlMs;
+      if (now - this.authCache.timestamp < ttl) {
+        if (!this.authCache.authenticated) {
+          return {
+            available: false,
+            reason: "agy is not signed in: run agy once interactively",
+          };
+        }
+        return { available: true, version, exe: CLI.COMMANDS.AGY };
       }
-      return { available: true, version, exe: CLI.COMMANDS.AGY };
     }
 
     try {
@@ -254,6 +272,10 @@ export class AgyConnector implements Connector {
               : typeof data?.error === "string"
                 ? data.error
                 : payload;
+          const combinedText =
+            [data?.short_error, data?.error, data?.message]
+              .filter((x): x is string => typeof x === "string" && Boolean(x.trim()))
+              .join(" ") || shortError;
           if (
             String(data?.status).toUpperCase() === "RESOURCE_EXHAUSTED" ||
             data?.error_code === 429 ||
@@ -262,8 +284,8 @@ export class AgyConnector implements Connector {
             return {
               error: shortError,
               usageLimit: {
-                ...usageLimit(shortError),
-                resetAt: agyUsageReset(shortError),
+                ...usageLimit(combinedText),
+                resetAt: agyUsageReset(combinedText),
               },
             };
           }

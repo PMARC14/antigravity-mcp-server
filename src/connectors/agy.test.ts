@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "fs";
-import { AgyConnector, agyUsageReset } from "./agy.js";
+import { AgyConnector, agyUsageReset, isUnauthenticated } from "./agy.js";
 import type { JobEvent, JobSpec } from "../jobs/connector.js";
 
 const connector = new AgyConnector();
@@ -68,7 +68,7 @@ test("write mode uses accept-edits, sandbox and a single settings argv", () => {
   assert.deepEqual(args.slice(2, 5), ["--mode", "accept-edits", "--sandbox"]);
   assert.equal(
     args[args.indexOf("--settings") + 1],
-    '{"permissions":{"allow":["command(*)"]}}',
+    '{"permissions":{"allow":["read_file(*)","list_dir(*)","command(*)"]}}',
   );
   assert.deepEqual(at(args, "--effort"), ["--effort", "high"]);
   assert.equal(args.includes("--dangerously-skip-permissions"), false);
@@ -212,6 +212,18 @@ test("the quota AGY_ERROR parses status RESOURCE_EXHAUSTED and error_code 429 in
   assert.ok(code429Event?.usageLimit);
 });
 
+test("AGY_ERROR parsing finds reset time and model in error and message fields", () => {
+  const line =
+    'AGY_ERROR: {"short_error":"Quota reached","error":"Limit reached for model gemini-2.5-pro","message":"Resets in 2h30m","status":"RESOURCE_EXHAUSTED","error_code":429}';
+  const before = Date.now();
+  const event = connector.parse(line, "stderr");
+  assert.ok(event?.usageLimit);
+  assert.equal(event.usageLimit.model, "gemini-2.5-pro");
+  assert.ok(typeof event.usageLimit.resetAt === "number");
+  const expectedSec = 2 * 3600 + 30 * 60;
+  assert.ok(event.usageLimit.resetAt >= before + expectedSec * 1000);
+});
+
 test("a non-quota retryable AGY_ERROR appends (retryable) and returns no usageLimit", () => {
   const retryableLine =
     'AGY_ERROR: {"short_error":"UNAVAILABLE (code 503): Service temporarily unavailable","status":"UNAVAILABLE","error_code":503,"retryable":true}';
@@ -285,6 +297,30 @@ test("a probe timeout failing open keeps agy available", async () => {
   });
 });
 
+test("valid usage JSON containing 0.401 is not treated as unauthenticated", async () => {
+  const usageJson = JSON.stringify({
+    status: "SUCCESS",
+    command: {
+      data: {
+        groups: [
+          {
+            name: "Gemini Models",
+            fraction: 0.401,
+          },
+        ],
+      },
+    },
+  });
+  assert.equal(isUnauthenticated(usageJson), false);
+
+  const c = new AgyConnector({
+    executeCommand: async () => "agy 1.5.0",
+    runUsage: async () => usageJson,
+  });
+  const res = await c.detect();
+  assert.equal(res.available, true);
+});
+
 test("the cache preserves auth result for 10 minutes", async () => {
   let fakeNow = 1000000;
   let probeCalls = 0;
@@ -333,10 +369,17 @@ test("the cache preserves auth result for 10 minutes", async () => {
   assert.equal(u1.available, false);
   assert.equal(unauthCalls, 1);
 
-  unauthNow += 5 * 60 * 1000;
+  // Within 60 seconds: cached, probe not called again
+  unauthNow += 30 * 1000;
   const u2 = await cUnauth.detect();
   assert.equal(u2.available, false);
   assert.equal(unauthCalls, 1);
+
+  // After 60 seconds: cache expired, probe is called again
+  unauthNow += 31 * 1000; // total 61s elapsed
+  const u3 = await cUnauth.detect();
+  assert.equal(u3.available, false);
+  assert.equal(unauthCalls, 2);
 });
 
 
