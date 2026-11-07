@@ -26,7 +26,9 @@ for (const mode of ["read", "write", "full"] as const) {
       const firstTurn = JSON.parse(lines[0]).message.content;
       assert.match(firstTurn, /^This is a read-only task/);
       assert.ok(firstTurn.endsWith(prompt));
-      const settings = JSON.parse(result.args[result.args.indexOf("--settings") + 1]);
+      const settings = JSON.parse(
+        result.args[result.args.indexOf("--settings") + 1],
+      );
       assert.ok(settings.permissions.allow.includes("command(git diff*)"));
       assert.ok(!settings.permissions.allow.includes("command(*)"));
     } else {
@@ -55,7 +57,7 @@ for (const mode of ["read", "write", "full"] as const) {
     if (mode === "write") {
       assert.equal(
         result.args[result.args.indexOf("--settings") + 1],
-        '{"permissions":{"allow":["read_file(*)","list_dir(*)","command(*)"]}}',
+        '{"permissions":{"allow":["read_file(*)","list_dir(*)","command(*)","mcp(agent_bridge/*)"]}}',
       );
     }
   });
@@ -64,7 +66,9 @@ for (const mode of ["read", "write", "full"] as const) {
 test("long prompts use the same stdin transport", async () => {
   const prompt = "x".repeat(150000);
   const result = await builder.build(prompt);
-  assert.ok(JSON.parse(result.stdin.split("\n")[0]).message.content.endsWith(prompt));
+  assert.ok(
+    JSON.parse(result.stdin.split("\n")[0]).message.content.endsWith(prompt),
+  );
   assert.ok(!result.args.some((arg) => arg.includes(prompt)));
 });
 
@@ -106,7 +110,11 @@ test("effort, JSON schema and workspace arguments stay separate", async () => {
     concisePrompt: true,
   });
   assert.ok(result.args.includes(schema));
-  assert.ok(JSON.parse(result.stdin.split("\n")[0]).message.content.endsWith(result.finalPrompt));
+  assert.ok(
+    JSON.parse(result.stdin.split("\n")[0]).message.content.endsWith(
+      result.finalPrompt,
+    ),
+  );
 });
 
 test("legacy permission switches map onto safe modes", () => {
@@ -133,14 +141,31 @@ for (const options of [
 }
 
 test("trusted mode edits and runs commands without agy's sandbox (Git Bash breaks under it)", () => {
-  const result = new AgyCommandBuilder().buildSync("run the tests", { mode: "trusted" });
+  const result = new AgyCommandBuilder().buildSync("run the tests", {
+    mode: "trusted",
+  });
   assert.ok(result.args.includes("accept-edits"));
   assert.equal(result.args.includes("--sandbox"), false);
   assert.equal(result.args.includes("--dangerously-skip-permissions"), false);
   const settings = result.args[result.args.indexOf("--settings") + 1];
-  assert.deepEqual(JSON.parse(settings), { permissions: { allow: ["read_file(*)", "list_dir(*)", "command(*)"] } });
-  assert.equal(resolveAgyMode({ mode: "trusted", skipPermissions: false }), "trusted");
-  assert.throws(() => resolveAgyMode({ mode: "trusted", skipPermissions: true }), /conflicts/);
+  assert.deepEqual(JSON.parse(settings), {
+    permissions: {
+      allow: [
+        "read_file(*)",
+        "list_dir(*)",
+        "command(*)",
+        "mcp(agent_bridge/*)",
+      ],
+    },
+  });
+  assert.equal(
+    resolveAgyMode({ mode: "trusted", skipPermissions: false }),
+    "trusted",
+  );
+  assert.throws(
+    () => resolveAgyMode({ mode: "trusted", skipPermissions: true }),
+    /conflicts/,
+  );
 });
 
 test("settings JSON contains read_file(*) and list_dir(*) in read, write, and trusted modes", async () => {
@@ -150,8 +175,14 @@ test("settings JSON contains read_file(*) and list_dir(*) in read, write, and tr
     assert.ok(settingsIdx !== -1, `Mode ${mode} must include --settings`);
     const settings = JSON.parse(result.args[settingsIdx + 1]);
     const allow: string[] = settings?.permissions?.allow ?? [];
-    assert.ok(allow.includes("read_file(*)"), `Mode ${mode} must allow read_file(*)`);
-    assert.ok(allow.includes("list_dir(*)"), `Mode ${mode} must allow list_dir(*)`);
+    assert.ok(
+      allow.includes("read_file(*)"),
+      `Mode ${mode} must allow read_file(*)`,
+    );
+    assert.ok(
+      allow.includes("list_dir(*)"),
+      `Mode ${mode} must allow list_dir(*)`,
+    );
   }
 });
 
@@ -169,14 +200,20 @@ test("createAgyStdinPlan handles steer and result lifecycle", async () => {
 
   // First result arrives while steer is pending -> keep stdin open
   const r1 = handler(
-    JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "done 1" } }),
+    JSON.stringify({
+      event: "result",
+      result: { status: "SUCCESS", response: "done 1" },
+    }),
     "stdout",
   );
   assert.equal(r1, undefined);
 
   // Second result arrives (for steer turn 1) -> no steer pending -> close stdin
   const r2 = handler(
-    JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "done 2" } }),
+    JSON.stringify({
+      event: "result",
+      result: { status: "SUCCESS", response: "done 2" },
+    }),
     "stdout",
   );
   assert.deepEqual(r2, { close: true });
@@ -187,7 +224,10 @@ test("createAgyStdinPlan closes stdin on first result when no steer is pending",
   const handler = plan({ apply: () => {}, emit: () => {} });
 
   const r1 = handler(
-    JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "done" } }),
+    JSON.stringify({
+      event: "result",
+      result: { status: "SUCCESS", response: "done" },
+    }),
     "stdout",
   );
   assert.deepEqual(r1, { close: true });
@@ -205,7 +245,11 @@ test("createAgyStdinPlan in read mode combines recovery with steering", async ()
   const r1 = handler(
     JSON.stringify({
       event: "result",
-      result: { status: "SUCCESS", response: "denied", denied_actions: [{ action: "cmd" }] },
+      result: {
+        status: "SUCCESS",
+        response: "denied",
+        denied_actions: [{ action: "cmd" }],
+      },
     }),
     "stdout",
   );
@@ -213,14 +257,20 @@ test("createAgyStdinPlan in read mode combines recovery with steering", async ()
 
   // Next result arrives (one turn finished) -> still pending
   const r2 = handler(
-    JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "turn 2 done" } }),
+    JSON.stringify({
+      event: "result",
+      result: { status: "SUCCESS", response: "turn 2 done" },
+    }),
     "stdout",
   );
   assert.equal(r2, undefined);
 
   // Next result arrives (last turn finished) -> close stdin
   const r3 = handler(
-    JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "turn 3 done" } }),
+    JSON.stringify({
+      event: "result",
+      result: { status: "SUCCESS", response: "turn 3 done" },
+    }),
     "stdout",
   );
   assert.deepEqual(r3, { close: true });
@@ -230,7 +280,14 @@ test("createAgyStdinPlan closes stdin when stderr line starts with AGY_ERROR:", 
   for (const mode of ["read", "write", "trusted", "full"] as const) {
     const plan = createAgyStdinPlan(mode);
     const handler = plan({ apply: () => {}, emit: () => {} });
-    const action = handler('AGY_ERROR: {"status":"RESOURCE_EXHAUSTED"}', "stderr");
-    assert.deepEqual(action, { close: true }, `Mode ${mode} must close stdin on AGY_ERROR`);
+    const action = handler(
+      'AGY_ERROR: {"status":"RESOURCE_EXHAUSTED"}',
+      "stderr",
+    );
+    assert.deepEqual(
+      action,
+      { close: true },
+      `Mode ${mode} must close stdin on AGY_ERROR`,
+    );
   }
 });

@@ -1,5 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { JobStore } from './store.js';
 import { fixture, fakeConnector, meta, until } from './test-helpers.js';
 import { JobManager } from './manager.js';
 import {
@@ -11,8 +14,45 @@ import {
 } from './channel.js';
 import type { JobMeta, JobState } from './connector.js';
 
-const ON = { AGENT_JOBS_CHANNEL: '1' };
+const ON = { AGENT_JOBS_CHANNEL: '1', CLAUDE_AGENTS: '1' };
 const SECRET = 'SECRET-FINAL-TEXT-ignore-previous-instructions';
+
+test('channel delivery never claims the hook wake marker and retry resets both independent markers', () => {
+  const f = fixture();
+  const store = new JobStore(f.home);
+  const source = fakeManager();
+  const server = fakeServer();
+  const job = meta(f.home, { state: 'queued' });
+  store.create(job, 'fake');
+  const path = (name: string) => join(store.dir(job.id), name);
+  // Same marker checks and exclusive write as hook-wait.sh; a silently dropped
+  // channel event must leave this fallback free to claim its own wake.
+  const hookWake = () => {
+    if (['collected', 'woken', 'mcp-task.json'].some(name => existsSync(path(name)))) return false;
+    try { writeFileSync(path('woken'), '', { flag: 'wx' }); return true; } catch { return false; }
+  };
+  const stop = startChannelNotifier({ ...source, store }, server.server, 'codex', undefined, ON);
+  try {
+    source.emit({ ...job, state: 'completed' }, 'running');
+    assert.equal(existsSync(path('woken')), false);
+    assert.equal(existsSync(path('channel-sent')), true);
+    assert.equal(hookWake(), true);
+    assert.equal(hookWake(), false);
+    store.write({ ...job, state: 'running' });
+    assert.equal(existsSync(path('channel-sent')), false);
+    assert.equal(existsSync(path('woken')), false);
+    source.emit({ ...job, state: 'running' }, 'queued');
+    source.emit({ ...job, state: 'completed' }, 'running');
+    assert.equal(server.calls.length, 2);
+    writeFileSync(path('collected'), '');
+    assert.equal(hookWake(), false);
+    store.write({ ...job, state: 'queued' });
+    writeFileSync(path('mcp-task.json'), '{}');
+    source.emit({ ...job, state: 'completed' }, 'running');
+    assert.equal(server.calls.length, 2);
+    assert.equal(hookWake(), false);
+  } finally { stop(); f.cleanup(); }
+});
 
 type Call = { method: string; params: { content: string; meta?: Record<string, string> } };
 function fakeServer(fail = false) {
@@ -71,7 +111,7 @@ test('each notifying state sends exactly once with metadata only', () => {
     assert.equal(m.label, 'mylabelx');
     assert.equal(
       call.params.content.startsWith(
-        `codex job ${m.state}: call codex_job_result with this job_id`
+        `codex agent ${m.state}: call codex_agent_result with this job_id`
       ),
       true
     );
@@ -82,7 +122,7 @@ test('each notifying state sends exactly once with metadata only', () => {
   assert.match(paused.params.content, /2030-01-02T03:04:05.000Z/);
   const done = calls.find(call => call.params.meta!.state === 'completed')!;
   assert.equal(done.params.meta!.reset_at, undefined);
-  assert.equal(done.params.content, 'codex job completed: call codex_job_result with this job_id');
+  assert.equal(done.params.content, 'codex agent completed: call codex_agent_result with this job_id');
 });
 
 test('label is sanitized, capped and omitted when empty; meta keys are identifiers', () => {
@@ -139,21 +179,36 @@ test('a failing notification is logged and never thrown', async () => {
 });
 
 test('nothing is declared or sent when the env var is off', () => {
-  for (const env of [{}, { AGENT_JOBS_CHANNEL: '0' }, { AGENT_JOBS_CHANNEL: 'true' }]) {
+  for (const env of [{}, { AGENT_JOBS_CHANNEL: '1' }, { AGENT_JOBS_CHANNEL: '1', CLAUDE_AGENTS: '0' }]) {
     const caps = { tools: {}, logging: {} };
     assert.equal(withChannelCapabilities(caps, env), caps);
     assert.equal(withChannelInstructions('base', 'codex', env), 'base');
     assert.equal(withChannelInstructions(undefined, 'codex', env), undefined);
+    const f = fixture();
+    const store = new JobStore(f.home);
+    const job = meta(f.home, { state: 'queued' });
+    store.create(job, 'fake');
     const manager = fakeManager();
     const { calls, server } = fakeServer();
-    startChannelNotifier(manager, server, 'codex', undefined, env)();
+    startChannelNotifier({ ...manager, store }, server, 'codex', undefined, env)();
     assert.equal(manager.count(), 0);
-    manager.emit(meta('/x', { state: 'completed' }), 'running');
+    manager.emit({ ...job, state: 'completed' }, 'running');
     assert.equal(calls.length, 0);
+    assert.equal(existsSync(join(store.dir(job.id), 'channel-sent')), false);
+    f.cleanup();
   }
 });
 
 test('capabilities and instructions merge when enabled', () => {
+  for (const env of [{ CLAUDE_AGENTS: '1' }, { CLAUDE_AGENTS: '1', AGENT_JOBS_CHANNEL: '0' }, ON]) {
+    assert.match(withChannelInstructions(undefined, 'codex', env)!, /<channel/);
+    assert.ok('experimental' in withChannelCapabilities({ tools: {} }, env));
+    const manager = fakeManager();
+    const { calls, server } = fakeServer();
+    startChannelNotifier(manager, server, 'codex', undefined, env);
+    manager.emit(meta('/x', { state: 'completed' }), 'running');
+    assert.equal(calls.length, 1);
+  }
   const caps = withChannelCapabilities(
     { tools: {}, experimental: { other: { a: 1 } } as Record<string, object> },
     ON
@@ -164,9 +219,9 @@ test('capabilities and instructions merge when enabled', () => {
     experimental: { 'claude/channel': {} },
   });
   const text = withChannelInstructions('Existing.', 'agy', ON)!;
-  assert.match(text, /^Existing\.\n\nBackground job events arrive as <channel source=/);
-  assert.match(text, /call agy_job_result with the job_id/);
-  assert.match(withChannelInstructions(undefined, 'agy', ON)!, /^Background job events/);
+  assert.match(text, /^Existing\.\n\nBackground agent events arrive as <channel source=/);
+  assert.match(text, /call agy_agent_result with the job_id/);
+  assert.match(withChannelInstructions(undefined, 'agy', ON)!, /^Background agent events/);
 });
 
 test('real manager: terminal states notify once without leaking worker output', async () => {

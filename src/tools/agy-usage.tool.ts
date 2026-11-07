@@ -6,7 +6,9 @@ const agyUsageArgsSchema = z.object({
   refresh: z
     .boolean()
     .default(false)
-    .describe("Ignore the 5-minute cache and run agy /usage again."),
+    .describe(
+      "Compatibility flag; shared cache and failure backoff always apply.",
+    ),
   tallies: z
     .boolean()
     .default(false)
@@ -18,7 +20,7 @@ const agyUsageArgsSchema = z.object({
 export const agyUsageTool: UnifiedTool = {
   name: "agy_usage",
   description:
-    "Official agy quota via `agy -p /usage` (no model turn, cached 5 minutes): per model group, 5-hour and weekly used % with reset times, plus a short meter line. Never fails hard; reports unavailable with a reason.",
+    "Official agy quota via `agy -p /usage` (no model turn, shared cache: 5 minutes on AC, 15 on battery or failure): per model group, 5-hour and weekly used % with reset times, plus a short meter line. Never fails hard; reports unavailable with a reason.",
   zodSchema: agyUsageArgsSchema,
   annotations: {
     readOnlyHint: true,

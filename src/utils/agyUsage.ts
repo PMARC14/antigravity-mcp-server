@@ -1,13 +1,16 @@
-import { usageWindow, type UsageWindow as CommonUsageWindow } from "../jobs/usage.js";
+import { getUsage, type UsageCacheOptions } from "../jobs/usage-cache.js";
+import {
+  usageWindow,
+  type UsageWindow as CommonUsageWindow,
+} from "../jobs/usage.js";
 import {
   existsSync,
   readdirSync,
   readFileSync,
   renameSync,
-  statSync,
   writeFileSync,
 } from "fs";
-import { homedir, tmpdir } from "os";
+import { homedir } from "os";
 import { join, resolve } from "path";
 import { spawnCommand } from "./processSpawner.js";
 
@@ -80,8 +83,12 @@ export function parseAgyQuota(raw: string, now = Date.now()): AgyQuota {
       if (typeof b?.remaining_fraction !== "number" || Number.isNaN(reset))
         continue;
       const window: UsageWindow = {
-        ...usageWindow(Math.round((1 - b.remaining_fraction) * 100), reset / 1000, now,
-          b.window === "5h" ? 300 : b.window === "weekly" ? 10080 : undefined),
+        ...usageWindow(
+          Math.round((1 - b.remaining_fraction) * 100),
+          reset / 1000,
+          now,
+          b.window === "5h" ? 300 : b.window === "weekly" ? 10080 : undefined,
+        ),
         resetAt: new Date(reset).toISOString(),
       };
       if (b.window === "5h") group.fiveHour = window;
@@ -109,8 +116,16 @@ export function parseAgyQuota(raw: string, now = Date.now()): AgyQuota {
           .join(" · "),
       )
       .join(" · ");
-  return { available: true, source: "live", snapshotAt: new Date(now).toISOString(),
-    snapshotAgeSec: 0, meter: summary, takenAt: Math.floor(now / 1000), groups, summary };
+  return {
+    available: true,
+    source: "live",
+    snapshotAt: new Date(now).toISOString(),
+    snapshotAgeSec: 0,
+    meter: summary,
+    takenAt: Math.floor(now / 1000),
+    groups,
+    summary,
+  };
 }
 
 export type UsageRunner = (timeoutMs: number) => Promise<string>;
@@ -142,13 +157,29 @@ export const runAgyUsage: UsageRunner = (timeoutMs) =>
   });
 
 export interface FetchUsageOptions {
+  /** Compatibility flag: the shared cache and failure backoff always apply. */
   refresh?: boolean;
   run?: UsageRunner;
   now?: number;
-  cachePath?: string;
+  usageCache?: UsageCacheOptions;
   /** Claude Code status line directory; agy.json is written only if it exists. */
   claudeUsageDir?: string;
-  cacheTtlMs?: number;
+}
+
+/** Every caller shares one probe, cache, and failure/battery backoff. */
+export async function getAgyUsage(options: FetchUsageOptions = {}) {
+  return getUsage<AgyQuota>(
+    "agy",
+    async () => {
+      const raw = await (options.run ?? runAgyUsage)(15000);
+      const parsed = parseAgyQuota(raw, options.now ?? Date.now());
+      return { ok: parsed.available, raw, parsed };
+    },
+    {
+      ...options.usageCache,
+      ...(options.now === undefined ? {} : { now: () => options.now! }),
+    },
+  );
 }
 
 function atomicJson(path: string, value: unknown): void {
@@ -161,54 +192,55 @@ export async function fetchAgyQuota(
   options: FetchUsageOptions = {},
 ): Promise<AgyQuota> {
   const now = options.now ?? Date.now();
-  const cachePath =
-    options.cachePath ?? join(tmpdir(), "agy-mcp-usage-cache.json");
-  const ttl = options.cacheTtlMs ?? 5 * 60 * 1000;
-  if (!options.refresh) {
-    try {
-      const cached = JSON.parse(readFileSync(cachePath, "utf8"));
-      if (now - statSync(cachePath).mtimeMs < ttl && cached?.available) {
-        for (const g of cached.groups as UsageGroup[])
-          for (const w of [g.fiveHour, g.weekly])
-            if (w) Object.assign(w, usageWindow(w.usedPercent, Date.parse(w.resetAt) / 1000, now, w.windowMinutes));
-        cached.source = "cache";
-        cached.snapshotAt ??= new Date(cached.takenAt * 1000).toISOString();
-        cached.snapshotAgeSec = Math.max(0, Math.round((now - Date.parse(cached.snapshotAt)) / 1000));
-        cached.meter ??= cached.summary;
-        return cached as AgyQuota;
-      }
-    } catch {
-      /* no usable cache */
+  let probed = false;
+  const snapshot = await getAgyUsage({
+    ...options,
+    run: async (timeout) => {
+      probed = true;
+      return (options.run ?? runAgyUsage)(timeout);
+    },
+  });
+  const quota: AgyQuota = snapshot?.parsed
+    ? structuredClone(snapshot.parsed)
+    : {
+        available: false,
+        source: "cache",
+        reason:
+          typeof snapshot?.raw === "string"
+            ? snapshot.raw
+            : "No shared usage snapshot available",
+        groups: [],
+      };
+  quota.source = probed ? "live" : "cache";
+  if (quota.snapshotAt)
+    quota.snapshotAgeSec = Math.max(
+      0,
+      Math.round((now - Date.parse(quota.snapshotAt)) / 1000),
+    );
+  for (const group of quota.groups) {
+    for (const window of [group.fiveHour, group.weekly]) {
+      if (window)
+        Object.assign(
+          window,
+          usageWindow(
+            window.usedPercent,
+            Date.parse(window.resetAt) / 1000,
+            now,
+            window.windowMinutes,
+          ),
+        );
     }
   }
-  let quota: AgyQuota;
+  const dir = options.claudeUsageDir ?? join(homedir(), ".claude", "usage");
   try {
-    quota = parseAgyQuota(await (options.run ?? runAgyUsage)(15000), now);
-  } catch (error) {
-    quota = {
-      available: false,
-      source: "live",
-      reason: `agy /usage failed: ${(error as Error).message}`,
-      groups: [],
-    };
-  }
-  if (quota.available) {
-    try {
-      atomicJson(cachePath, quota);
-    } catch {
-      /* cache is optional */
-    }
-    const dir = options.claudeUsageDir ?? join(homedir(), ".claude", "usage");
-    try {
-      if (existsSync(dir))
-        atomicJson(join(dir, "agy.json"), {
-          taken_at: quota.takenAt,
-          summary: quota.summary,
-          groups: quota.groups,
-        });
-    } catch {
-      /* status line file is optional */
-    }
+    if (quota.available && existsSync(dir))
+      atomicJson(join(dir, "agy.json"), {
+        taken_at: quota.takenAt,
+        summary: quota.summary,
+        groups: quota.groups,
+      });
+  } catch {
+    /* Status line file is optional. */
   }
   return quota;
 }

@@ -1,11 +1,24 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import spawn from "cross-spawn";
-import { readFileSync, appendFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fixture, meta, until } from "../jobs/test-helpers.js";
 import { JobStore } from "../jobs/store.js";
-import { MODERN_PROTOCOL, TASK_EXTENSION } from "./mcp-tasks.js";
+import {
+  MODERN_PROTOCOL,
+  TASK_EXTENSION,
+  registerMcpTasks,
+} from "./mcp-tasks.js";
+import { toolRegistry } from "./registry.js";
+import {
+  clientTaskGet,
+  clientCreateTask,
+  clientAgentTaskMeta,
+  clientTaskList,
+  clientTaskNotification,
+} from "./client-schemas.js";
+import { z } from "zod";
 
 const modernMeta = (tasks = true) => ({
   "io.modelcontextprotocol/protocolVersion": MODERN_PROTOCOL,
@@ -36,7 +49,7 @@ async function setup(f = fixture(), era: "legacy" | "modern" = "legacy") {
         ...process.env,
         AGENT_JOBS_HOME: f.home,
         AGENT_JOBS_MAX: "1",
-        AGENT_JOBS_CHANNEL: "0",
+        CLAUDE_AGENTS: "0",
       },
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
@@ -77,8 +90,11 @@ async function setup(f = fixture(), era: "legacy" | "modern" = "legacy") {
       output = output.slice(end + 1);
       if (!line.trim()) continue;
       const message = JSON.parse(line);
-      if (message.id === undefined) notifications.push(message);
-      else {
+      if (message.id === undefined) {
+        if (message.method === "notifications/tasks/status")
+          clientTaskNotification.parse(message);
+        notifications.push(message);
+      } else {
         const entry = pending.get(message.id);
         if (!entry) continue;
         clearTimeout(entry.timer);
@@ -110,6 +126,17 @@ async function setup(f = fixture(), era: "legacy" | "modern" = "legacy") {
       era === "modern" ? { ...params, _meta: modernMeta() } : params,
     );
     assert.equal(response.error, undefined, JSON.stringify(response.error));
+    if (era === "modern") {
+      if (method === "tasks/get" || method === "tasks/cancel")
+        clientTaskGet.parse(response.result);
+      if (method === "tasks/list") clientTaskList.parse(response.result);
+      if (response.result.resultType === "task") {
+        clientCreateTask.parse(response.result);
+        clientAgentTaskMeta.parse(
+          response.result._meta["com.anthropic/agent-task"],
+        );
+      }
+    }
     return response.result;
   };
   const call = (name: string, args: any, task?: object) =>
@@ -161,7 +188,7 @@ async function setup(f = fixture(), era: "legacy" | "modern" = "legacy") {
     detects: () => readFileSync(detectsPath, "utf8"),
     start: (options: any = {}, task?: object) =>
       call(
-        "agy_job_start",
+        "agy_agent",
         {
           cwd: f.home,
           prompt: JSON.stringify({
@@ -175,7 +202,7 @@ async function setup(f = fixture(), era: "legacy" | "modern" = "legacy") {
   };
 }
 
-test("legacy task start returns immediately, polls metadata, notifies, and returns job_result verbatim", async () => {
+test("legacy task start returns immediately, polls metadata, notifies, and returns agent_result verbatim", async () => {
   const s = await setup();
   try {
     assert.equal(s.initialized.protocolVersion, "2025-11-25");
@@ -183,7 +210,7 @@ test("legacy task start returns immediately, polls metadata, notifies, and retur
       tools: { call: {} },
     });
     const created = await s.start({}, { ttl: 60000 });
-    assert.deepEqual(Object.keys(created), ["task"]);
+    assert.deepEqual(Object.keys(created).sort(), ["_meta", "task"]);
     const { taskId } = created.task;
     assert.equal(created.task.status, "working");
     assert.equal(created.task.pollInterval, 15000);
@@ -200,7 +227,10 @@ test("legacy task start returns immediately, polls metadata, notifies, and retur
     const pendingResult = s.rpc("tasks/result", { taskId });
     await until(() => s.store.get(taskId).state === "completed");
     const result = await pendingResult;
-    assert.deepEqual(result, await s.call("agy_job_result", { jobId: taskId }));
+    assert.deepEqual(
+      result,
+      await s.call("agy_agent_result", { jobId: taskId }),
+    );
     assert.equal(JSON.parse(result.content[0].text).final, "task result");
     assert.equal((await s.rpc("tasks/get", { taskId })).status, "completed");
     await until(() =>
@@ -265,13 +295,13 @@ test("paused tasks stay working until reset, and superseded jobs name their repl
     await until(() => s.store.get(taskId).state === "paused");
     const paused = await s.rpc("tasks/get", { taskId });
     assert.equal(paused.status, "working");
-    assert.match(paused.statusMessage, /^Paused until /);
+    assert.match(paused.statusMessage, /Paused until /);
     assert.ok(
       paused.statusMessage.includes(
         new Date(s.store.get(taskId).resetAt!).toISOString(),
       ),
     );
-    const replacement = await s.call("agy_job_requeue", { jobId: taskId });
+    const replacement = await s.call("agy_agent_retry", { jobId: taskId });
     const supersededBy = JSON.parse(replacement.content[0].text).jobId;
     const superseded = await s.rpc("tasks/get", { taskId });
     assert.equal(superseded.status, "cancelled");
@@ -292,8 +322,8 @@ test("ordinary calls stay unchanged; task watch adopts the job immediately; exec
         .filter((tool: any) => tool.execution)
         .map((tool: any) => [tool.name, tool.execution]),
       [
-        ["agy_job_start", { taskSupport: "optional" }],
-        ["agy_job_watch", { taskSupport: "optional" }],
+        ["agy_agent", { taskSupport: "optional" }],
+        ["agy_agent_follow", { taskSupport: "optional" }],
       ],
     );
     const started = await s.start();
@@ -301,7 +331,7 @@ test("ordinary calls stay unchanged; task watch adopts the job immediately; exec
     assert.equal(started.task, undefined);
     const { jobId } = JSON.parse(started.content[0].text);
     assert.deepEqual((await s.rpc("tasks/list")).tasks, []);
-    const watched = await s.call("agy_job_watch", { jobId, maxWaitSec: 0 });
+    const watched = await s.call("agy_agent_follow", { jobId, maxWaitSec: 0 });
     const watchResult = JSON.parse(watched.content[0].text);
     assert.equal(watchResult.timedOut, true);
     assert.equal(watchResult.jobId, jobId);
@@ -310,13 +340,13 @@ test("ordinary calls stay unchanged; task watch adopts the job immediately; exec
         .length,
       0,
     );
-    const taskWatch = await s.call("agy_job_watch", { jobId }, {});
+    const taskWatch = await s.call("agy_agent_follow", { jobId }, {});
     assert.equal(taskWatch.task.taskId, jobId);
     assert.equal(taskWatch.task.status, "working");
     await until(() => s.store.get(jobId).state === "completed");
     assert.deepEqual(
       await s.rpc("tasks/result", { taskId: jobId }),
-      await s.call("agy_job_result", { jobId }),
+      await s.call("agy_agent_result", { jobId }),
     );
     const invalid = await s.raw("tools/call", {
       name: "ping",
@@ -350,7 +380,7 @@ test("tasks survive reconnect; read-only lookup does not subscribe and other con
     assert.equal((await s.rpc("tasks/get", { taskId })).status, "completed");
     assert.deepEqual(
       await s.rpc("tasks/result", { taskId }),
-      await s.call("agy_job_result", { jobId: taskId }),
+      await s.call("agy_agent_result", { jobId: taskId }),
     );
     assert.deepEqual(
       (await s.rpc("tasks/list")).tasks.map((t: any) => t.taskId),
@@ -398,22 +428,23 @@ test("modern discovery, extension opt-in, task get, and complete envelopes match
     assert.equal(created.pollIntervalMs, 15000);
     assert.equal(created.task, undefined);
     const { taskId } = created;
-    assert.equal((await s.rpc("tasks/get", { taskId })).resultType, "task");
+    clientTaskGet.parse(await s.rpc("tasks/get", { taskId }));
     await until(() => s.store.get(taskId).state === "completed");
     const result = await s.rpc("tasks/get", { taskId });
-    assert.equal(result.resultType, "complete");
+    assert.equal(result.status, "completed");
+    assert.equal(result.resultType, undefined);
     assert.equal(
-      result.content[0].text,
-      (await s.call("agy_job_result", { jobId: taskId })).content[0].text,
+      result.result.content[0].text,
+      (await s.call("agy_agent_result", { jobId: taskId })).content[0].text,
     );
     const ordinary = await s.raw("tools/call", {
-      name: "agy_job_start",
+      name: "agy_agent",
       arguments: { prompt: JSON.stringify({ waitMs: 10 }), cwd: s.f.home },
       _meta: modernMeta(false),
     });
     assert.equal(ordinary.result.resultType, "complete");
     assert.ok(JSON.parse(ordinary.result.content[0].text).jobId);
-    const watch = await s.call("agy_job_watch", { jobId: taskId });
+    const watch = await s.call("agy_agent_follow", { jobId: taskId });
     assert.equal(watch.resultType, "task");
     assert.equal(watch.taskId, taskId);
     assert.equal(watch.status, "completed");
@@ -450,34 +481,105 @@ test("failed and lost jobs map to failed, and pause without reset remains workin
     s.f.cleanup();
   }
 });
-
-test("task statusMessage hides reasoning text and does not leak it", async () => {
-  const s = await setup();
+test("task notifications follow derived approval status and suppress unchanged projections", async () => {
+  const f = fixture();
+  const store = new JobStore(f.home);
+  const notices: any[] = [];
+  const manager = {
+    connector: { id: "agy" },
+    store,
+    onTransition: store.onWrite.bind(store),
+  };
+  const server = {
+    setRequestHandler() {},
+    async notification(value: any) {
+      notices.push(value);
+    },
+  };
+  const before = toolRegistry.length;
+  toolRegistry.push({
+    name: "agy_agent_follow",
+    zodSchema: z.object({ jobId: z.string() }),
+  } as any);
+  const tasks = registerMcpTasks(server as any, "agy", manager as any, {
+    capabilities: {},
+  });
   try {
-    const taskId = "task-reasoning-test";
-    s.store.create(
-      meta(s.f.home, {
-        id: taskId,
-        connector: "agy",
-        state: "running",
-      }),
-      "fake",
+    const job = meta(f.home, { connector: "agy", state: "running" });
+    store.create(job, "fake");
+    await tasks.call("agy_agent_follow", { jobId: job.id });
+    const approval = {
+      id: "a",
+      kind: "commandExecution",
+      summary: "fake",
+      requestedAt: 1,
+    };
+    store.write({ ...job, pendingApproval: approval });
+    store.write({ ...job, pendingApproval: approval });
+    store.write(job);
+    store.write({ ...job, state: "paused" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(
+      notices.map((n) => n.params.status),
+      ["input_required", "working"],
     );
-    appendFileSync(
-      s.store.path(taskId, "stdout"),
-      JSON.stringify({
-        item: {
-          type: "reasoning",
-          text: "secret internal thinking process that should not leak",
-        },
-      }) + "\n",
+    notices.forEach((notice) => clientTaskNotification.parse(notice));
+  } finally {
+    tasks.close();
+    toolRegistry.splice(before);
+    f.cleanup();
+  }
+});
+
+test("modern cancel returns a task projection with modern timing fields", async () => {
+  const s = await setup(undefined, "modern");
+  try {
+    const { taskId } = await s.start({ waitMs: 60000 });
+    await until(
+      () =>
+        s.store.get(taskId).state === "running" &&
+        !!s.store.get(taskId).sessionId,
     );
-    const task = await s.rpc("tasks/get", { taskId });
-    assert.ok(
-      !task.statusMessage.includes("secret internal thinking process"),
-      `statusMessage leaked reasoning: ${task.statusMessage}`,
+    const cancelled = await s.rpc("tasks/cancel", { taskId });
+    assert.equal(cancelled.resultType, undefined);
+    assert.equal(cancelled.taskId, taskId);
+    assert.equal(cancelled.status, "cancelled");
+    assert.equal(cancelled.ttlMs, null);
+    assert.equal(cancelled.pollIntervalMs, 15000);
+    for (const key of ["ttl", "pollInterval", "cacheScope", "content"])
+      assert.equal(key in cancelled, false);
+    const result = await s.rpc("tasks/get", { taskId });
+    assert.equal(result.status, "cancelled");
+    assert.equal(result.resultType, undefined);
+  } finally {
+    await s.cleanup();
+    s.f.cleanup();
+  }
+});
+
+test("modern task projections never collect results or suppress the hook wake", async () => {
+  const s = await setup(undefined, "modern");
+  try {
+    const { taskId } = await s.start({ waitMs: 20 });
+    await until(() => s.store.get(taskId).state === "completed");
+    const marker = join(s.store.dir(taskId), "collected");
+    assert.equal(
+      existsSync(marker),
+      false,
+      "terminal notifications do not collect",
     );
-    assert.match(task.statusMessage, /\breasoning\b/);
+    assert.equal((await s.rpc("tasks/get", { taskId })).status, "completed");
+    assert.equal(existsSync(marker), false, "polling does not collect");
+    await s.rpc("tasks/list");
+    assert.equal(existsSync(marker), false, "listing does not collect");
+    await s.rpc("tasks/result", { taskId });
+    assert.equal(
+      existsSync(marker),
+      false,
+      "task payload reads do not collect",
+    );
+    await s.call("agy_agent_result", { jobId: taskId });
+    assert.equal(existsSync(marker), true, "explicit result tool collects");
   } finally {
     await s.cleanup();
     s.f.cleanup();

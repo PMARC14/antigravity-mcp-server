@@ -1,5 +1,6 @@
+import { bridgeSampler, answerBridge } from './bridge.js';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, statSync, writeFileSync, unlinkSync } from 'node:fs';
 import { dirname, join, resolve, win32 } from 'node:path';
 import { existsSync } from 'node:fs';
 import type {
@@ -156,6 +157,21 @@ export class JobManager {
   // Must run under the shared lock. The slot and the identities needed to retry the cleanup are
   // only dropped once the tree is confirmed dead; a later recovery pass retries the same record.
   private async recoverOrphan(job: JobMeta, now: number): Promise<void> {
+    // A file-based question can still be answered after its server disappears. Defer
+    // orphan cleanup only while its matching, unexpired mailbox has no answer.
+    if (job.state === 'running' && job.awaitingInput) {
+      const { qid, askedAt } = job.awaitingInput;
+      try {
+        const dir = this.store.dir(job.id);
+        const question = JSON.parse(readFileSync(join(dir, 'question.json'), 'utf8'));
+        let deadline = askedAt + 1800000;
+        try {
+          const claim = JSON.parse(readFileSync(join(dir, 'question.lock'), 'utf8'));
+          if (claim.id === qid && Number.isFinite(claim.ts) && Number.isFinite(claim.timeoutMs)) deadline = claim.ts + claim.timeoutMs;
+        } catch { /* Old mailbox without a claim uses the default timeout. */ }
+        if (question.id === qid && now < deadline && !existsSync(join(dir, `answer-${qid}.json`))) return;
+      } catch { /* Missing or malformed mailbox permits normal orphan cleanup. */ }
+    }
     if (job.state === 'lost' && now - (this.cleanupTried.get(job.id) ?? 0) < 2000) return;
     this.cleanupTried.set(job.id, now);
     let confirmed = true;
@@ -275,7 +291,7 @@ export class JobManager {
         effort: options.effort,
         label: options.label,
         resumeSession: options.resumeSession,
-        transport: options.transport ?? 'exec',
+        transport: options.transport ?? this.config.connectors[this.connector.id]?.defaultTransport ?? 'exec',
         approvalTimeoutMin: options.approvalTimeoutMin ?? 30,
         steers: 0,
         timeoutMin,
@@ -351,7 +367,7 @@ export class JobManager {
   private assertSendable(job: JobMeta): void {
     if (job.state === 'queued' || job.state === 'running' || job.reserved)
       throw new Error(
-        `Job is still running or queued; use ${job.connector}_job_watch and send once it stops, or ${job.connector}_job_cancel first (wait for process cleanup if reserved)`
+        `Job is still running or queued; use ${job.connector}_agent_follow and send once it stops, or ${job.connector}_agent_stop first (wait for process cleanup if reserved)`
       );
     if (!job.sessionId) throw new Error('Job has no sessionId; cannot send a follow-up');
   }
@@ -369,6 +385,20 @@ export class JobManager {
     return { jobId: result.jobId, state: result.state, followUpOf: jobId };
   }
 
+  async message(
+    jobId: string,
+    message: string,
+    overrides: Pick<StartOptions, 'mode' | 'model' | 'effort' | 'timeoutMin'> = {}
+  ) {
+    await this.initialize();
+    if (this.store.get(jobId).state === 'running') {
+      const { delivered } = await this.steer(jobId, message);
+      return { delivered, jobId };
+    }
+    const followUp = await this.send(jobId, message, overrides);
+    return { delivered: 'resumed' as const, jobId: followUp.jobId };
+  }
+
   watch(jobId: string, maxWaitSec = 1800, options: WatchOptions = {}) {
     return watchJob(this, jobId, maxWaitSec, options, this.watchShutdown.signal);
   }
@@ -379,8 +409,9 @@ export class JobManager {
     if (!this.owns(job)) throw new Error('Only the owning server can steer this job');
     if (job.state !== 'running') throw new Error('Only a running job can be steered');
     if (!message.trim()) throw new Error('Steer message must not be blank');
+    if (job.awaitingInput) { await this.respond(jobId, { answer: message }); return { delivered: 'answer' as const }; }
     const active = this.active.get(jobId);
-    if (!active?.process.steer) throw new Error(`this job can't take mid-turn messages; use ${this.connector.id}_job_send after it stops, or start it with transport: app-server`);
+    if (!active?.process.steer) throw new Error(`this job can't take mid-turn messages; use ${this.connector.id}_agent_message after it stops, or start it with transport: app-server`);
     if (active.cancelled) throw new Error('Job is stopping');
     const { delivered } = await active.process.steer(message);
     appendFileSync(join(this.store.dir(jobId), 'steer.log'), JSON.stringify({ timestamp: new Date().toISOString(), message }) + '\n');
@@ -389,9 +420,27 @@ export class JobManager {
     return { delivered };
   }
 
-  async respond(jobId: string, decision: ApprovalDecision) {
+  async respond(jobId: string, decision: ApprovalDecision | { answer: string; qid?: string }) {
     await this.initialize();
     const job = this.store.get(jobId);
+    if (typeof decision === 'object') {
+      const active = this.active.get(jobId);
+      if (job.state !== 'running' || active?.cancelled) throw new Error('No pending question for this running job');
+      const qid = job.awaitingInput?.qid;
+      try { answerBridge(this.store, job, decision.answer, decision.qid); }
+      finally {
+        // Also persist expiry discovered while answering, before the next sampler tick.
+        if (qid && !job.awaitingInput) {
+          if (active) {
+            active.job.awaitingInput = undefined;
+            active.job.stalled = false;
+            active.job.stalledSince = undefined;
+            this.store.save(active.job, this.owner);
+          } else this.store.write(job);
+        }
+      }
+      return { responded: true, qid };
+    }
     if (!this.owns(job)) throw new Error('Only the owning server can respond to this job');
     if (!['accept', 'acceptForSession', 'decline', 'cancel'].includes(decision)) throw new Error('Invalid approval decision');
     const active = this.active.get(jobId);
@@ -578,10 +627,14 @@ export class JobManager {
     let lastGrowth = Date.now();
     try {
       const prompt = this.store.read(job.id, 'prompt');
+      try { unlinkSync(join(this.store.dir(job.id), 'question.json')); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
       atomicWrite(job.finalPath, '');
       job.finishedAt = undefined;
       job.error = undefined;
       job.pendingApproval = undefined;
+      job.awaitingInput = undefined;
+      job.progressNote = undefined;
       job.approvalReason = undefined;
       job.exitCode = undefined;
       const command = this.connector.build({
@@ -651,6 +704,7 @@ export class JobManager {
         .then(async outcome => {
           workerDone = true;
           job.pendingApproval = undefined;
+          job.awaitingInput = undefined;
           killFailed = outcome.killFailed ?? false;
           clearTimeout(timer);
           if (event.final && !(await this.store.page(job.id, 'final', 0, 20000)).text.trim())
@@ -707,8 +761,13 @@ export class JobManager {
           if (!this.active.size) this.hold.stop();
           void this.pump().catch(error => this.logger.warn('Job queue error', error));
         });
+      const sampleBridge = bridgeSampler(this.store, job);
       this.active.set(job.id, { job, process, finished, cancelled: false, sample: () => {
-        if (job.pendingApproval) { lastGrowth = Date.now(); return; }
+        if (!workerDone && job.state === 'running') {
+          try { if (sampleBridge()) this.store.save(job, this.owner); }
+          catch (error) { this.logger.warn(`Job ${job.id} bridge sample failed`, error); }
+        }
+        if (job.pendingApproval || job.awaitingInput) { lastGrowth = Date.now(); return; }
         if (workerDone || job.state !== 'running' || !(job.stallTimeoutMin ?? 10) || stalledKill) return;
         const current = [statSync(this.store.path(job.id, 'stdout')).size, statSync(this.store.path(job.id, 'stderr')).size];
         const now = Date.now();
@@ -831,7 +890,7 @@ export class JobManager {
     };
   }
 
-  async result(jobId: string, waitSec = 0, includeReasoning = false) {
+  async result(jobId: string, waitSec = 0, includeReasoning = false, options: { markCollected?: boolean } = {}) {
     await this.initialize();
     const deadline = Date.now() + Math.min(10, Math.max(0, waitSec)) * 1000;
     let job = this.store.get(jobId);
@@ -840,12 +899,11 @@ export class JobManager {
       job = this.store.get(jobId);
     }
     const final = await this.store.page(jobId, 'final', 0, 20000);
-    if (!['queued', 'running'].includes(job.state)) writeFileSync(resolve(this.store.dir(jobId), 'collected'), '');
     let reasoningTail: string | undefined;
     if (includeReasoning) {
       try { reasoningTail = readFileSync(this.store.path(jobId, 'reasoning'), 'utf8').slice(-4000); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     }
-    return {
+    const result = {
       ...(includeReasoning && reasoningTail ? { reasoningTail } : {}),
       stalled: job.stalled ?? false,
       stalledSince: job.stalledSince,
@@ -869,6 +927,14 @@ export class JobManager {
           ? undefined
           : compactDiagnostics(this.tail(jobId, 'stderr', 30), this.publicEvents(jobId, 30)),
     };
+    if (options.markCollected && !['queued', 'running'].includes(result.state)) this.markCollected(jobId);
+    return result;
+  }
+
+  /** Called only after an explicit tool has successfully built its result. */
+  markCollected(jobId: string): void {
+    if (!['queued', 'running'].includes(this.store.get(jobId).state))
+      writeFileSync(resolve(this.store.dir(jobId), 'collected'), '');
   }
 
   async read(jobId: string, name: JobFile, offset = 0, limit = 20000) {
@@ -966,6 +1032,8 @@ export class JobManager {
         reserved: false,
         sessionId: undefined,
         pendingApproval: undefined,
+        awaitingInput: undefined,
+        progressNote: undefined,
         approvalReason: undefined,
         steers: 0,
         reason: undefined,

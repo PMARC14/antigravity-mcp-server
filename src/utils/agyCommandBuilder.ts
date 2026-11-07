@@ -1,4 +1,9 @@
-import type { StdinAction, StdinPlan, StdinHandler, SteerResult } from "../jobs/stdin.js";
+import type {
+  StdinAction,
+  StdinPlan,
+  StdinHandler,
+  SteerResult,
+} from "../jobs/stdin.js";
 import { CLI, DEFAULT_MODEL } from "../constants.js";
 import { resolveWorkingDirectory } from "./workingDirResolver.js";
 import { unlinkSync } from "fs";
@@ -56,7 +61,9 @@ export function resolveAgyMode(
           : "read"
         : defaultMode);
   if (!["read", "write", "trusted", "full"].includes(mode)) {
-    throw new Error(`Invalid mode: ${mode}. Expected read, write, trusted or full.`);
+    throw new Error(
+      `Invalid mode: ${mode}. Expected read, write, trusted or full.`,
+    );
   }
   if (
     options.skipPermissions !== undefined &&
@@ -73,10 +80,7 @@ export function resolveAgyMode(
 }
 
 /** Read-only tool permissions allowed in headless runs to prevent aborting on reads. */
-export const FILE_READ_PERMISSIONS = [
-  "read_file(*)",
-  "list_dir(*)",
-];
+export const FILE_READ_PERMISSIONS = ["read_file(*)", "list_dir(*)"];
 
 /** Read-only commands a read-mode run may use without a prompt. */
 export const READ_ONLY_COMMANDS = [
@@ -206,13 +210,25 @@ export class AgyCommandBuilder {
     const mode = resolveAgyMode(options);
     const args = [CLI.FLAGS.MODEL, options.model ?? DEFAULT_MODEL];
     if (mode === "full") {
-      args.push(CLI.FLAGS.SKIP_PERMISSIONS);
+      args.push(
+        CLI.FLAGS.SKIP_PERMISSIONS,
+        "--settings",
+        JSON.stringify({ permissions: { allow: ["mcp(agent_bridge/*)"] } }),
+      );
     } else if (mode === "write" || mode === "trusted") {
       args.push(CLI.FLAGS.MODE, "accept-edits");
       if (mode === "write") args.push(CLI.FLAGS.SANDBOX);
       args.push(
         "--settings",
-        JSON.stringify({ permissions: { allow: [...FILE_READ_PERMISSIONS, "command(*)"] } }),
+        JSON.stringify({
+          permissions: {
+            allow: [
+              ...FILE_READ_PERMISSIONS,
+              "command(*)",
+              "mcp(agent_bridge/*)",
+            ],
+          },
+        }),
       );
     } else {
       // A denied command aborts a headless run with no output, so plan mode
@@ -221,7 +237,15 @@ export class AgyCommandBuilder {
         CLI.FLAGS.MODE,
         "plan",
         "--settings",
-        JSON.stringify({ permissions: { allow: [...FILE_READ_PERMISSIONS, ...READ_ONLY_COMMANDS] } }),
+        JSON.stringify({
+          permissions: {
+            allow: [
+              ...FILE_READ_PERMISSIONS,
+              ...READ_ONLY_COMMANDS,
+              "mcp(agent_bridge/*)",
+            ],
+          },
+        }),
       );
     }
     if (options.effort) args.push(CLI.FLAGS.EFFORT, options.effort);
@@ -262,7 +286,9 @@ export class AgyCommandBuilder {
         prompt,
       }),
       logFile,
-      stdin: userTurn(mode === "read" ? READ_PREFIX + finalPrompt : finalPrompt),
+      stdin: userTurn(
+        mode === "read" ? READ_PREFIX + finalPrompt : finalPrompt,
+      ),
       stdinPlan: createAgyStdinPlan(mode),
     };
   }

@@ -56,7 +56,7 @@ async function setup() {
         ...process.env,
         AGENT_JOBS_HOME: f.home,
         AGENT_JOBS_MAX: "1",
-        AGENT_JOBS_CHANNEL: "0",
+        CLAUDE_AGENTS: "0",
       },
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
@@ -123,7 +123,7 @@ async function setup() {
     listeners: () => Number(readFileSync(listenersPath, "utf8")),
     async startJob(waitMs = 1200, gate?: string) {
       const response = await client.callTool({
-        name: "agy_job_start",
+        name: "agy_agent",
         arguments: {
           prompt: JSON.stringify({ waitMs, gate, final: "survived" }),
           cwd: f.home,
@@ -147,7 +147,7 @@ test("index dispatch sends watch state changes immediately and keeps other tools
     const jobId = await s.startJob(10, s.gate);
     const progress: { progress: number; message?: string }[] = [];
     const pending = s.client.callTool(
-      { name: "agy_job_watch", arguments: { jobId } },
+      { name: "agy_agent_follow", arguments: { jobId } },
       undefined,
       {
         onprogress: (event) => progress.push(event),
@@ -195,7 +195,7 @@ test("index dispatch forwards request cancellation and sends no watch progress w
   try {
     const jobId = await s.startJob();
     const pending = s.client.callTool(
-      { name: "agy_job_watch", arguments: { jobId } },
+      { name: "agy_agent_follow", arguments: { jobId } },
       undefined,
       {
         signal: controller.signal,
@@ -216,7 +216,7 @@ test("index dispatch forwards request cancellation and sends no watch progress w
       onmessage(message, extra);
     };
     const response = await s.client.callTool({
-      name: "agy_job_watch",
+      name: "agy_agent_follow",
       arguments: { jobId, maxWaitSec: 0.05 },
     });
     assert.equal(response.isError, false);
@@ -233,7 +233,7 @@ test("stdio EOF aborts the index watch while its real fake worker runs to comple
   try {
     const jobId = await s.startJob();
     const pending = s.client.callTool(
-      { name: "agy_job_watch", arguments: { jobId } },
+      { name: "agy_agent_follow", arguments: { jobId } },
       undefined,
       {
         onprogress: () => {},

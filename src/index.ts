@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+import {
+  installRequestErrorReporting,
+  trafficLog,
+} from "./tools/traffic-log.js";
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
@@ -66,6 +70,7 @@ const server = new Server(
     ...(CHANNEL_INSTRUCTIONS ? { instructions: CHANNEL_INSTRUCTIONS } : {}),
   },
 );
+installRequestErrorReporting(server);
 const mcpTasks = registerMcpTasks(server, "agy", agyJobManager, {
   capabilities,
   instructions: CHANNEL_INSTRUCTIONS,
@@ -201,7 +206,7 @@ server.setRequestHandler(
 
     if (toolExists(toolName)) {
       const progressToken = (request.params as any)._meta?.progressToken;
-      const watching = toolName === "agy_job_watch";
+      const watching = toolName === "agy_agent_follow";
       const progressData = watching
         ? undefined
         : startProgressUpdates(toolName, progressToken);
@@ -247,6 +252,7 @@ server.setRequestHandler(
         } as CallToolResult;
       } catch (error) {
         if (progressData) stopProgressUpdates(progressData, false);
+        trafficLog.error(`tools/call ${toolName}`, error);
         Logger.error(`Error in tool '${toolName}':`, error);
         const errorMessage =
           error instanceof Error ? error.message : String(error);

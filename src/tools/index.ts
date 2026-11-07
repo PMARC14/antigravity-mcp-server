@@ -1,3 +1,4 @@
+import { selftestTool, debugLogTool } from "./debug-tools.js";
 import { toolRegistry } from "./registry.js";
 import { askAgyTool } from "./ask-agy.tool.js";
 import { batchAgyTool } from "./batch-agy.tool.js";
@@ -22,14 +23,13 @@ import { JobManager } from "../jobs/manager.js";
 import { registerJobTools } from "../jobs/tools.js";
 import { Logger } from "../utils/logger.js";
 
-export const agyJobManager = new JobManager(
-  new AgyConnector(),
-  undefined,
-  Logger,
-);
+const agyConnector = new AgyConnector();
+export const agyJobManager = new JobManager(agyConnector, undefined, Logger);
 registerJobTools(toolRegistry, "agy", agyJobManager);
 
 toolRegistry.push(
+  selftestTool,
+  debugLogTool,
   agyUsageTool,
   askAgyTool,
   batchAgyTool,

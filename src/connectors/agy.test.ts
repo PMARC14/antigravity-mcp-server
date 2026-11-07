@@ -1,15 +1,34 @@
-import { test } from "node:test";
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  existsSync,
+  rmSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test, after } from "node:test";
+import { fetchAgyQuota } from "../utils/agyUsage.js";
 import assert from "node:assert/strict";
 import { readFileSync } from "fs";
 import { AgyConnector, agyUsageReset, isUnauthenticated } from "./agy.js";
 import type { JobEvent, JobSpec } from "../jobs/connector.js";
 
+const usageHomes: string[] = [];
+const testUsageCache = () => {
+  const home = mkdtempSync(join(tmpdir(), "agy-usage-test-"));
+  usageHomes.push(home);
+  return { home, onBattery: false };
+};
+after(() => {
+  for (const home of usageHomes) rmSync(home, { recursive: true, force: true });
+});
 const connector = new AgyConnector();
 const spec: JobSpec = {
   id: "job",
   connector: "agy",
   prompt: 'hello\n$() & "quote"',
-  cwd: process.cwd(),
+  cwd: mkdtempSync(join(tmpdir(), "agy-connector-test-")),
   mode: "read",
   timeoutMin: 120,
   finalPath: "/jobs/job/final.txt",
@@ -54,7 +73,10 @@ test("read mode uses plan, stdin NDJSON and the default model", () => {
   assert.equal(args.filter((a) => a === "stream-json").length, 2);
   assert.equal(args.includes(spec.prompt), false);
   assert.equal(args.includes("-p"), false);
-  const turns = stdin.trim().split("\n").map((line) => JSON.parse(line));
+  const turns = stdin
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
   assert.equal(turns[0].event, "user");
   assert.ok(turns[0].message.content.endsWith(spec.prompt));
   // Recovery is conditional on the first result.
@@ -68,7 +90,7 @@ test("write mode uses accept-edits, sandbox and a single settings argv", () => {
   assert.deepEqual(args.slice(2, 5), ["--mode", "accept-edits", "--sandbox"]);
   assert.equal(
     args[args.indexOf("--settings") + 1],
-    '{"permissions":{"allow":["read_file(*)","list_dir(*)","command(*)"]}}',
+    '{"permissions":{"allow":["read_file(*)","list_dir(*)","command(*)","mcp(agent_bridge/*)"]}}',
   );
   assert.deepEqual(at(args, "--effort"), ["--effort", "high"]);
   assert.equal(args.includes("--dangerously-skip-permissions"), false);
@@ -108,7 +130,9 @@ test("a slash-command looking prompt still travels on stdin, never argv", () => 
   const { args, stdin } = connector.build({ ...spec, prompt: "/usage" });
   assert.equal(args.includes("/usage"), false);
   assert.equal(args.includes("-p"), false);
-  assert.ok(JSON.parse(stdin.split("\n")[0]).message.content.endsWith("/usage"));
+  assert.ok(
+    JSON.parse(stdin.split("\n")[0]).message.content.endsWith("/usage"),
+  );
 });
 
 test("parses the real write-run fixture", () => {
@@ -174,9 +198,16 @@ test("quota errors become usage_limit with best-effort reset", () => {
   assert.equal(answer?.usageLimit, undefined);
   assert.equal(answer?.final, "The rate limit is 5/min");
   assert.equal(connector.parse("not json", "stdout"), null);
-  assert.equal(connector.parse('quota for model "fake-model" exhausted', 'stderr')?.usageLimit?.model, 'fake-model');
+  assert.equal(
+    connector.parse('quota for model "fake-model" exhausted', "stderr")
+      ?.usageLimit?.model,
+    "fake-model",
+  );
   const justPassed = new Date(2026, 10, 4, 17, 37, 10);
-  assert.equal(agyUsageReset('try again at 5:37 PM', justPassed), justPassed.getTime() + 60000);
+  assert.equal(
+    agyUsageReset("try again at 5:37 PM", justPassed),
+    justPassed.getTime() + 60000,
+  );
 });
 
 test("the quota AGY_ERROR parses status RESOURCE_EXHAUSTED and error_code 429 into usageLimit", () => {
@@ -229,7 +260,8 @@ test("a non-quota retryable AGY_ERROR appends (retryable) and returns no usageLi
     'AGY_ERROR: {"short_error":"UNAVAILABLE (code 503): Service temporarily unavailable","status":"UNAVAILABLE","error_code":503,"retryable":true}';
   const event = connector.parse(retryableLine, "stderr");
   assert.deepEqual(event, {
-    error: "UNAVAILABLE (code 503): Service temporarily unavailable (retryable)",
+    error:
+      "UNAVAILABLE (code 503): Service temporarily unavailable (retryable)",
   });
 
   // When retryable is false, (retryable) is not appended
@@ -259,6 +291,7 @@ test("the old regex path handles legacy quota errors on stderr", () => {
 test("unauthenticated detect returns available false with interactive sign-in reason", async () => {
   // Scenario A: AGY_ERROR with UNAUTHENTICATED status
   const c1 = new AgyConnector({
+    usageCache: testUsageCache(),
     executeCommand: async () => "agy 1.5.0",
     runUsage: async () =>
       'AGY_ERROR: {"short_error":"UNAUTHENTICATED (code 401): Please sign in","status":"UNAUTHENTICATED","error_code":401}',
@@ -271,6 +304,7 @@ test("unauthenticated detect returns available false with interactive sign-in re
 
   // Scenario B: JSON with ERROR status and response "please sign in"
   const c2 = new AgyConnector({
+    usageCache: testUsageCache(),
     executeCommand: async () => "agy 1.5.0",
     runUsage: async () =>
       JSON.stringify({ status: "ERROR", response: "please sign in" }),
@@ -284,6 +318,7 @@ test("unauthenticated detect returns available false with interactive sign-in re
 
 test("a probe timeout failing open keeps agy available", async () => {
   const c = new AgyConnector({
+    usageCache: testUsageCache(),
     executeCommand: async () => "agy 1.5.0",
     runUsage: async () => {
       throw new Error("agy /usage timed out");
@@ -314,6 +349,7 @@ test("valid usage JSON containing 0.401 is not treated as unauthenticated", asyn
   assert.equal(isUnauthenticated(usageJson), false);
 
   const c = new AgyConnector({
+    usageCache: testUsageCache(),
     executeCommand: async () => "agy 1.5.0",
     runUsage: async () => usageJson,
   });
@@ -321,67 +357,58 @@ test("valid usage JSON containing 0.401 is not treated as unauthenticated", asyn
   assert.equal(res.available, true);
 });
 
-test("the cache preserves auth result for 10 minutes", async () => {
-  let fakeNow = 1000000;
-  let probeCalls = 0;
-  const c = new AgyConnector({
-    executeCommand: async () => "agy 1.5.0",
-    runUsage: async () => {
-      probeCalls++;
-      return JSON.stringify({
-        status: "SUCCESS",
-        command: { data: { groups: [{ name: "Gemini Models" }] } },
-      });
+test("detect, quota guard and usage tool share the machine cache and failure backoff", async () => {
+  let now = 1000000,
+    calls = 0;
+  const usageCache = testUsageCache();
+  let raw = JSON.stringify({
+    status: "SUCCESS",
+    command: {
+      data: {
+        groups: [
+          {
+            name: "Gemini Models",
+            buckets: [
+              {
+                window: "5h",
+                remaining_fraction: 0.75,
+                reset_time: "2026-11-08T00:00:00Z",
+              },
+            ],
+          },
+        ],
+      },
     },
-    now: () => fakeNow,
   });
-
-  // First detect calls probe
-  const res1 = await c.detect();
-  assert.equal(res1.available, true);
-  assert.equal(probeCalls, 1);
-
-  // 5 minutes later: still within 10 min cache TTL, probe not called again
-  fakeNow += 5 * 60 * 1000;
-  const res2 = await c.detect();
-  assert.equal(res2.available, true);
-  assert.equal(probeCalls, 1);
-
-  // 10 minutes later (15 min elapsed): cache expired, probe is called again
-  fakeNow += 10 * 60 * 1000;
-  const res3 = await c.detect();
-  assert.equal(res3.available, true);
-  assert.equal(probeCalls, 2);
-
-  // Also verify unauthenticated result is cached
-  let unauthCalls = 0;
-  let unauthNow = 2000000;
-  const cUnauth = new AgyConnector({
-    executeCommand: async () => "agy 1.5.0",
+  const options = {
+    usageCache,
+    executeCommand: async () => "agy 1.5.2",
+    now: () => now,
     runUsage: async () => {
-      unauthCalls++;
-      return 'AGY_ERROR: {"status":"UNAUTHENTICATED","short_error":"not signed in"}';
+      calls++;
+      return raw;
     },
-    now: () => unauthNow,
-  });
-
-  const u1 = await cUnauth.detect();
-  assert.equal(u1.available, false);
-  assert.equal(unauthCalls, 1);
-
-  // Within 60 seconds: cached, probe not called again
-  unauthNow += 30 * 1000;
-  const u2 = await cUnauth.detect();
-  assert.equal(u2.available, false);
-  assert.equal(unauthCalls, 1);
-
-  // After 60 seconds: cache expired, probe is called again
-  unauthNow += 31 * 1000; // total 61s elapsed
-  const u3 = await cUnauth.detect();
-  assert.equal(u3.available, false);
-  assert.equal(unauthCalls, 2);
+  };
+  const c = new AgyConnector(options);
+  assert.equal((await c.detect()).available, true);
+  assert.equal(await c.usagePercent(), 25);
+  const quota = await fetchAgyQuota({ usageCache, now, run: options.runUsage });
+  assert.equal(quota.available, true);
+  assert.equal(calls, 1);
+  now += 299999;
+  assert.equal((await new AgyConnector(options).detect()).available, true);
+  assert.equal(calls, 1);
+  now++;
+  raw = 'AGY_ERROR: {"status":"UNAUTHENTICATED","short_error":"not signed in"}';
+  assert.equal((await c.detect()).available, false);
+  assert.equal(calls, 2);
+  now += 899999;
+  assert.equal((await c.detect()).available, false);
+  assert.equal(calls, 2);
+  now++;
+  await c.detect();
+  assert.equal(calls, 3);
 });
-
 
 test("usagePercent returns max used percent across 5h and weekly for Gemini model group", async () => {
   const usageJsonWeeklyMax = JSON.stringify({
@@ -423,6 +450,7 @@ test("usagePercent returns max used percent across 5h and weekly for Gemini mode
   });
 
   const c1 = new AgyConnector({
+    usageCache: testUsageCache(),
     runUsage: async () => usageJsonWeeklyMax,
   });
   const percent1 = await c1.usagePercent();
@@ -456,6 +484,7 @@ test("usagePercent returns max used percent across 5h and weekly for Gemini mode
   });
 
   const c2 = new AgyConnector({
+    usageCache: testUsageCache(),
     runUsage: async () => usageJson5hMax,
   });
   const percent2 = await c2.usagePercent();
@@ -465,6 +494,7 @@ test("usagePercent returns max used percent across 5h and weekly for Gemini mode
 test("usagePercent returns undefined on any error", async () => {
   // Scenario 1: runUsage throws
   const cErr = new AgyConnector({
+    usageCache: testUsageCache(),
     runUsage: async () => {
       throw new Error("timed out");
     },
@@ -473,18 +503,22 @@ test("usagePercent returns undefined on any error", async () => {
 
   // Scenario 2: malformed JSON
   const cBadJson = new AgyConnector({
+    usageCache: testUsageCache(),
     runUsage: async () => "not a json string",
   });
   assert.equal(await cBadJson.usagePercent(), undefined);
 
   // Scenario 3: error status / sign in required
   const cSign = new AgyConnector({
-    runUsage: async () => JSON.stringify({ status: "ERROR", response: "please sign in" }),
+    usageCache: testUsageCache(),
+    runUsage: async () =>
+      JSON.stringify({ status: "ERROR", response: "please sign in" }),
   });
   assert.equal(await cSign.usagePercent(), undefined);
 
   // Scenario 4: empty groups
   const cEmpty = new AgyConnector({
+    usageCache: testUsageCache(),
     runUsage: async () =>
       JSON.stringify({
         status: "SUCCESS",
@@ -492,4 +526,33 @@ test("usagePercent returns undefined on any error", async () => {
       }),
   });
   assert.equal(await cEmpty.usagePercent(), undefined);
+});
+
+test("bridge preamble requires a global entry; worker identity is supplied only in spawn env", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "agy-bridge-"));
+  const configPath = join(cwd, "mcp_config.json");
+  const c = new AgyConnector({ mcpConfigPath: configPath });
+  const job = {
+    ...spec,
+    cwd,
+    id: "bridge-test",
+    finalPath: join(cwd, "jobs", "bridge-test", "final.txt"),
+  };
+  try {
+    assert.doesNotMatch(c.build(job).stdin, /ask_orchestrator/);
+    const original = JSON.stringify({
+      mcpServers: {
+        agent_bridge: { command: process.execPath, args: ["bridge.js"] },
+      },
+    });
+    writeFileSync(configPath, original);
+    const command = c.build(job);
+    assert.match(command.stdin, /ask_orchestrator/);
+    assert.equal(command.env.AGENT_JOB_ID, job.id);
+    assert.equal(command.env.AGENT_JOBS_HOME, cwd);
+    assert.equal(readFileSync(configPath, "utf8"), original);
+    assert.equal(existsSync(join(cwd, ".agents")), false);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });

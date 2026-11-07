@@ -1,10 +1,17 @@
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "path";
 import type { Connector, JobEvent, JobSpec } from "../jobs/connector.js";
 import { AgyCommandBuilder, AgyEffort } from "../utils/agyCommandBuilder.js";
 import { executeCommand } from "../utils/commandExecutor.js";
 import { fetchModels } from "../utils/modelList.js";
+import type { UsageCacheOptions } from "../jobs/usage-cache.js";
 import { CLI, DEFAULT_MODEL, MODELS, REVIEW_MODEL } from "../constants.js";
-import { fetchAgyQuota, runAgyUsage, type UsageRunner } from "../utils/agyUsage.js";
+import {
+  fetchAgyQuota,
+  getAgyUsage,
+  type UsageRunner,
+} from "../utils/agyUsage.js";
 
 const QUOTA_PATTERN =
   /quota|rate[ _-]?limit|resource[ _]exhausted|exhausted|usage limit|\b429\b/i;
@@ -12,7 +19,10 @@ const DENIED_PATTERN = /no output produced.*auto-denied/i;
 
 // Vendor-neutral reset formats, including minute-precision local clocks.
 export { usageReset as agyUsageReset } from "../jobs/usage-reset.js";
-import { usageLimit, usageReset as agyUsageReset } from "../jobs/usage-reset.js";
+import {
+  usageLimit,
+  usageReset as agyUsageReset,
+} from "../jobs/usage-reset.js";
 
 function quotaEvent(message: string): JobEvent {
   return {
@@ -104,16 +114,31 @@ export interface AgyConnectorOptions {
     timeoutMs?: number,
   ) => Promise<string>;
   now?: () => number;
-  authCacheTtlMs?: number;
-  negativeAuthCacheTtlMs?: number;
+  usageCache?: UsageCacheOptions;
+  /** Global config override for isolated tests; agy itself always reads the global path. */
+  mcpConfigPath?: string;
 }
 
 export class AgyConnector implements Connector {
   readonly id = "agy";
   readonly defaultModel = DEFAULT_MODEL;
   readonly reviewModel = REVIEW_MODEL;
+  private readonly mcpConfigPath: string;
+  bridgeInstalled(): boolean {
+    try {
+      const entry = JSON.parse(readFileSync(this.mcpConfigPath, "utf8"))
+        .mcpServers?.agent_bridge;
+      return (
+        typeof entry?.command === "string" &&
+        Array.isArray(entry.args) &&
+        entry.args.length > 0
+      );
+    } catch {
+      return false;
+    }
+  }
   private readonly builder = new AgyCommandBuilder();
-  private readonly runUsage: UsageRunner;
+  private readonly runUsage?: UsageRunner;
   private readonly executeCmd: (
     command: string,
     args: string[],
@@ -121,23 +146,19 @@ export class AgyConnector implements Connector {
     timeoutMs?: number,
   ) => Promise<string>;
   private readonly now: () => number;
-  private readonly authCacheTtlMs: number;
-  private readonly negativeAuthCacheTtlMs: number;
-  private authCache?: { authenticated: boolean; timestamp: number };
+  private readonly usageCache: UsageCacheOptions;
 
   constructor(options: AgyConnectorOptions = {}) {
-    this.runUsage = options.runUsage ?? runAgyUsage;
+    this.runUsage = options.runUsage;
     this.executeCmd = options.executeCommand ?? executeCommand;
     this.now = options.now ?? Date.now;
-    this.authCacheTtlMs = options.authCacheTtlMs ?? 10 * 60 * 1000;
-    this.negativeAuthCacheTtlMs = options.negativeAuthCacheTtlMs ?? 60 * 1000;
+    this.usageCache = options.usageCache ?? {};
+    this.mcpConfigPath =
+      options.mcpConfigPath ??
+      join(homedir(), ".gemini", "config", "mcp_config.json");
   }
 
-  clearAuthCache(): void {
-    this.authCache = undefined;
-  }
-
-  async detect(): ReturnType<Connector['detect']> {
+  async detect(): ReturnType<Connector["detect"]> {
     let version = "";
     try {
       version = (
@@ -154,45 +175,21 @@ export class AgyConnector implements Connector {
       };
     }
 
-    const now = this.now();
-    if (this.authCache) {
-      const ttl = this.authCache.authenticated
-        ? this.authCacheTtlMs
-        : this.negativeAuthCacheTtlMs;
-      if (now - this.authCache.timestamp < ttl) {
-        if (!this.authCache.authenticated) {
-          return {
-            available: false,
-            reason: "agy is not signed in: run agy once interactively",
-          };
-        }
-        return { available: true, version, exe: CLI.COMMANDS.AGY };
-      }
+    const usage = await getAgyUsage({
+      run: this.runUsage,
+      now: this.now(),
+      usageCache: this.usageCache,
+    });
+    if (
+      usage &&
+      isUnauthenticated(typeof usage.raw === "string" ? usage.raw : "")
+    ) {
+      return {
+        available: false,
+        reason: "agy is not signed in: run agy once interactively",
+      };
     }
-
-    try {
-      const probeOutput = await this.runUsage(5000);
-      if (isUnauthenticated(probeOutput)) {
-        this.authCache = { authenticated: false, timestamp: now };
-        return {
-          available: false,
-          reason: "agy is not signed in: run agy once interactively",
-        };
-      }
-      this.authCache = { authenticated: true, timestamp: now };
-      return { available: true, version, exe: CLI.COMMANDS.AGY };
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      if (isUnauthenticated(msg)) {
-        this.authCache = { authenticated: false, timestamp: now };
-        return {
-          available: false,
-          reason: "agy is not signed in: run agy once interactively",
-        };
-      }
-      // A failed probe for other reasons, like a timeout, must not mark agy unavailable: fail open.
-      return { available: true, version, exe: CLI.COMMANDS.AGY };
-    }
+    return { available: true, version, exe: CLI.COMMANDS.AGY };
   }
 
   async models(): Promise<string[]> {
@@ -206,15 +203,24 @@ export class AgyConnector implements Connector {
   }
 
   async health() {
-    return { ...(await this.detect()), models: await this.models(), reviewModel: this.reviewModel };
+    return {
+      ...(await this.detect()),
+      models: await this.models(),
+      reviewModel: this.reviewModel,
+    };
   }
 
   sandboxDirs(job: JobSpec): string[] {
     return job.worktree ? [job.worktree.gitDir] : [];
   }
 
-  build(job: JobSpec): ReturnType<Connector['build']> {
-    const built = this.builder.buildSync(job.prompt, {
+  build(
+    job: JobSpec,
+  ): ReturnType<Connector["build"]> & { env: NodeJS.ProcessEnv } {
+    const prompt = this.bridgeInstalled()
+      ? `If you need a decision or information from the orchestrator, call \`ask_orchestrator\`; use \`report_progress\` for milestone notes.\n\n${job.prompt}`
+      : job.prompt;
+    const built = this.builder.buildSync(prompt, {
       model: job.model ?? this.defaultModel,
       mode: job.mode,
       effort: job.effort as AgyEffort | undefined,
@@ -223,7 +229,17 @@ export class AgyConnector implements Connector {
       workingDir: job.cwd,
       logFile: join(dirname(job.finalPath), "agy.log"),
     });
-    return { exe: CLI.COMMANDS.AGY, args: built.args, stdin: built.stdin, stdinPlan: built.stdinPlan };
+    return {
+      exe: CLI.COMMANDS.AGY,
+      args: built.args,
+      stdin: built.stdin,
+      stdinPlan: built.stdinPlan,
+      env: {
+        ...process.env,
+        AGENT_JOB_ID: job.id,
+        AGENT_JOBS_HOME: dirname(dirname(dirname(job.finalPath))),
+      },
+    };
   }
 
   /**
@@ -235,9 +251,9 @@ export class AgyConnector implements Connector {
   async usagePercent(): Promise<number | undefined> {
     try {
       const quota = await fetchAgyQuota({
-        refresh: true,
         run: this.runUsage,
         now: this.now(),
+        usageCache: this.usageCache,
       });
       if (!quota?.available) return undefined;
       // Jobs default to DEFAULT_MODEL (gemini-3.8-flash-high), so inspect the Gemini model group.
@@ -274,7 +290,9 @@ export class AgyConnector implements Connector {
                 : payload;
           const combinedText =
             [data?.short_error, data?.error, data?.message]
-              .filter((x): x is string => typeof x === "string" && Boolean(x.trim()))
+              .filter(
+                (x): x is string => typeof x === "string" && Boolean(x.trim()),
+              )
               .join(" ") || shortError;
           if (
             String(data?.status).toUpperCase() === "RESOURCE_EXHAUSTED" ||

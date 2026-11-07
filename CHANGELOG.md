@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Shared `agy_job_*` tools, worktree collection, usage reporting and opt-in channel notifications.
+- Shared `agy_agent*` tools, worktree collection, usage reporting and opt-in channel notifications.
 - Trusted mode for worktree jobs that need unsandboxed commands with normal approvals on Windows.
 
 ### Changed

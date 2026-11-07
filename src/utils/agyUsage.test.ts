@@ -66,12 +66,15 @@ const usageJson = JSON.stringify({
 test("parses /usage into used percentages, resets and a meter line", () => {
   const q = parseAgyQuota(usageJson, NOW);
   assert.equal(q.available, true);
-  assert.equal(q.source, 'live');
+  assert.equal(q.source, "live");
   assert.equal(q.snapshotAt, new Date(NOW).toISOString());
   assert.equal(q.snapshotAgeSec, 0);
   assert.equal(q.meter, q.summary);
-  assert.equal(q.groups[0].fiveHour?.resetsAt, Date.parse('2026-10-31T20:39:33Z') / 1000);
-  assert.equal(q.groups[0].fiveHour?.resetAtIso, '2026-10-31T20:39:33.000Z');
+  assert.equal(
+    q.groups[0].fiveHour?.resetsAt,
+    Date.parse("2026-10-31T20:39:33Z") / 1000,
+  );
+  assert.equal(q.groups[0].fiveHour?.resetAtIso, "2026-10-31T20:39:33.000Z");
   assert.equal(q.groups[0].fiveHour?.windowMinutes, 300);
   assert.equal(q.groups[0].fiveHour?.usedPercent, 2);
   assert.equal(q.groups[0].weekly?.usedPercent, 25);
@@ -93,7 +96,7 @@ test("failures are reported as unavailable", async () => {
   const dir = mkdtempSync(join(tmpdir(), "agy-usage-"));
   try {
     const opts = {
-      cachePath: join(dir, "c.json"),
+      usageCache: { home: dir, onBattery: false },
       claudeUsageDir: join(dir, "none"),
     };
     const failed = await fetchAgyQuota({
@@ -113,42 +116,35 @@ test("failures are reported as unavailable", async () => {
   }
 });
 
-test("caches for five minutes, honors refresh, writes status file only if dir exists", async () => {
+test("shared cache caps refresh requests and writes status file only when its directory exists", async () => {
   const dir = mkdtempSync(join(tmpdir(), "agy-usage-"));
   try {
     let calls = 0;
     const run = async () => (calls++, usageJson);
     const claudeUsageDir = join(dir, "usage");
-    const cachePath = join(dir, "cache.json");
-    await fetchAgyQuota({ run, cachePath, claudeUsageDir, now: NOW });
+    const options = {
+      run,
+      usageCache: { home: dir, onBattery: false },
+      claudeUsageDir,
+    };
+    await fetchAgyQuota({ ...options, now: NOW });
     assert.equal(existsSync(join(claudeUsageDir, "agy.json")), false);
     mkdirSync(claudeUsageDir);
-    await fetchAgyQuota({
-      run,
-      cachePath,
-      claudeUsageDir,
-      now: NOW,
+    const cached = await fetchAgyQuota({
+      ...options,
+      now: NOW + 1000,
       refresh: true,
     });
-    assert.equal(calls, 2);
+    assert.equal(calls, 1);
+    assert.equal(cached.source, "cache");
+    assert.equal(cached.snapshotAgeSec, 1);
     const file = JSON.parse(
       readFileSync(join(claudeUsageDir, "agy.json"), "utf8"),
     );
     assert.equal(file.taken_at, Math.floor(NOW / 1000));
-    assert.match(file.summary, /^agy gem 5h 2%/);
     assert.equal(file.groups.length, 3);
-    // The cache age uses file mtime, so a real-clock now is a hit.
-    const hit = await fetchAgyQuota({
-      run,
-      cachePath,
-      claudeUsageDir,
-      now: Date.now(),
-    });
+    await fetchAgyQuota({ ...options, now: NOW + 300000 });
     assert.equal(calls, 2);
-    assert.equal(hit.available, true);
-    assert.equal(hit.source, 'cache');
-    assert.equal(hit.snapshotAt, new Date(NOW).toISOString());
-    assert.ok(hit.snapshotAgeSec! > 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
