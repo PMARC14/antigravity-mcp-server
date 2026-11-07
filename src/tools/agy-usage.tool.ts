@@ -30,7 +30,10 @@ export const agyUsageTool: UnifiedTool = {
   category: "simple",
   execute: async (args) => {
     const parsed = agyUsageArgsSchema.parse(args);
-    const quota = await fetchAgyQuota({ refresh: parsed.refresh });
+    const quota = await fetchAgyQuota({
+      refresh: parsed.refresh,
+      explicit: true,
+    });
     return JSON.stringify(
       parsed.tallies ? { ...quota, tallies: computeAgyUsage() } : quota,
       null,

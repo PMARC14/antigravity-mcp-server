@@ -201,7 +201,11 @@ server.setRequestHandler(
     const toolName: string = request.params.name;
 
     if (request.params.task !== undefined) {
-      return mcpTasks.call(toolName, request.params.arguments || {});
+      return mcpTasks.call(
+        toolName,
+        request.params.arguments || {},
+        request.params._meta,
+      );
     }
 
     if (toolExists(toolName)) {

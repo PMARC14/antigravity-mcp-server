@@ -8,6 +8,7 @@ import {
   readdirSync,
   readFileSync,
   renameSync,
+  unlinkSync,
   writeFileSync,
 } from "fs";
 import { homedir } from "os";
@@ -156,9 +157,85 @@ export const runAgyUsage: UsageRunner = (timeoutMs) =>
     });
   });
 
+export function isUnauthenticated(raw: string): boolean {
+  if (!raw) return false;
+  const trimmed = raw.trim();
+  if (!trimmed) return false;
+
+  for (const line of trimmed.split("\n")) {
+    const t = line.trim();
+    if (t.startsWith("AGY_ERROR:")) {
+      try {
+        const data = JSON.parse(t.slice("AGY_ERROR:".length).trim());
+        if (
+          String(data?.status).toUpperCase() === "UNAUTHENTICATED" ||
+          data?.error_code === 401 ||
+          data?.error_code === "401"
+        ) {
+          return true;
+        }
+        const text = `${data?.short_error ?? ""} ${data?.error ?? ""}`;
+        if (
+          /unauthenticated|not authenticated|sign[ -]?in|login|unauthorized|\b401\b/i.test(
+            text,
+          )
+        ) {
+          return true;
+        }
+      } catch {
+        /* fall through */
+      }
+    }
+  }
+
+  try {
+    const data = JSON.parse(trimmed);
+    if (
+      String(data?.status).toUpperCase() === "SUCCESS" ||
+      data?.command?.data?.groups ||
+      data?.groups ||
+      data?.quotaGroups ||
+      data?.quota_groups
+    ) {
+      return false;
+    }
+    if (
+      String(data?.status).toUpperCase() === "UNAUTHENTICATED" ||
+      data?.error_code === 401 ||
+      data?.error_code === "401" ||
+      data?.code === 401
+    ) {
+      return true;
+    }
+    const text = `${data?.response ?? ""} ${data?.error ?? ""} ${data?.message ?? ""} ${data?.short_error ?? ""}`;
+    if (
+      /unauthenticated|not authenticated|sign[ -]?in|login|unauthorized|\b401\b/i.test(
+        text,
+      )
+    ) {
+      return true;
+    }
+    return false;
+  } catch {
+    /* not JSON */
+  }
+
+  if (
+    /unauthenticated|not authenticated|not signed in|please sign in|sign in again|\b401\b/i.test(
+      trimmed,
+    )
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 export interface FetchUsageOptions {
   /** Compatibility flag: the shared cache and failure backoff always apply. */
   refresh?: boolean;
+  /** Explicit tool invocation (e.g. agy_usage tool): re-probes unauthenticated results immediately. */
+  explicit?: boolean;
   run?: UsageRunner;
   now?: number;
   usageCache?: UsageCacheOptions;
@@ -168,16 +245,50 @@ export interface FetchUsageOptions {
 
 /** Every caller shares one probe, cache, and failure/battery backoff. */
 export async function getAgyUsage(options: FetchUsageOptions = {}) {
+  const home = resolve(
+    options.usageCache?.home ??
+      process.env.AGENT_JOBS_HOME ??
+      join(homedir(), ".agent-jobs"),
+  );
+  const cacheFile = join(home, "cache", "agy-usage.json");
+  const now =
+    options.now ??
+    (options.usageCache?.now ? options.usageCache.now() : Date.now());
+
+  let force = options.usageCache?.force;
+  if (existsSync(cacheFile)) {
+    try {
+      const cached = JSON.parse(readFileSync(cacheFile, "utf8"));
+      if (
+        cached?.ok === false &&
+        isUnauthenticated(typeof cached.raw === "string" ? cached.raw : "")
+      ) {
+        // Negative sign-in results must expire after 60 s, or be re-probed on an explicit agy_usage call
+        if (options.explicit || now - cached.takenAt >= 60000) {
+          try {
+            unlinkSync(cacheFile);
+          } catch {
+            /* ignore */
+          }
+          force = true;
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
   return getUsage<AgyQuota>(
     "agy",
     async () => {
       const raw = await (options.run ?? runAgyUsage)(15000);
-      const parsed = parseAgyQuota(raw, options.now ?? Date.now());
+      const parsed = parseAgyQuota(raw, now);
       return { ok: parsed.available, raw, parsed };
     },
     {
       ...options.usageCache,
-      ...(options.now === undefined ? {} : { now: () => options.now! }),
+      force,
+      ...(options.now === undefined ? {} : { now: () => now }),
     },
   );
 }

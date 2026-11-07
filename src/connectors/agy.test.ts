@@ -101,6 +101,7 @@ test("full mode uses only the skip-permissions flag", () => {
   assert.ok(args.includes("--dangerously-skip-permissions"));
   assert.equal(args.includes("--mode"), false);
   assert.equal(args.includes("--sandbox"), false);
+  assert.equal(args.includes("--settings"), false);
 });
 
 test("resume, worktree dirs and explicit models", () => {
@@ -395,14 +396,14 @@ test("detect, quota guard and usage tool share the machine cache and failure bac
   const quota = await fetchAgyQuota({ usageCache, now, run: options.runUsage });
   assert.equal(quota.available, true);
   assert.equal(calls, 1);
-  now += 299999;
+  now += 899999;
   assert.equal((await new AgyConnector(options).detect()).available, true);
   assert.equal(calls, 1);
   now++;
   raw = 'AGY_ERROR: {"status":"UNAUTHENTICATED","short_error":"not signed in"}';
   assert.equal((await c.detect()).available, false);
   assert.equal(calls, 2);
-  now += 899999;
+  now += 59999;
   assert.equal((await c.detect()).available, false);
   assert.equal(calls, 2);
   now++;
@@ -555,4 +556,142 @@ test("bridge preamble requires a global entry; worker identity is supplied only 
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
+});
+
+test("detect does not check isUnauthenticated when usage.ok is true even if raw text contains sign in strings", async () => {
+  const c = new AgyConnector({
+    usageCache: testUsageCache(),
+    executeCommand: async () => "agy 1.5.0",
+    runUsage: async () =>
+      JSON.stringify({
+        status: "SUCCESS",
+        command: {
+          data: {
+            groups: [
+              {
+                name: "Gemini Models",
+                buckets: [
+                  {
+                    window: "5h",
+                    remaining_fraction: 0.8,
+                    reset_time: "2026-11-08T00:00:00Z",
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        response: "Please sign in to web console for more details 401",
+      }),
+  });
+  const res = await c.detect();
+  assert.equal(res.available, true);
+});
+
+test("usagePercent picks group matching the job model: Argon, Claude/GPT, or Gemini", async () => {
+  const usageJson = JSON.stringify({
+    status: "SUCCESS",
+    command: {
+      data: {
+        groups: [
+          {
+            name: "Gemini Models",
+            buckets: [
+              {
+                window: "5h",
+                remaining_fraction: 0.8,
+                reset_time: "2026-11-08T00:00:00Z",
+              },
+            ],
+          },
+          {
+            name: "Claude and GPT models",
+            buckets: [
+              {
+                window: "5h",
+                remaining_fraction: 0.4,
+                reset_time: "2026-11-08T00:00:00Z",
+              },
+            ],
+          },
+          {
+            name: "Gemini 4 Argon",
+            buckets: [
+              {
+                window: "weekly",
+                remaining_fraction: 0.1,
+                reset_time: "2026-11-08T00:00:00Z",
+              },
+            ],
+          },
+        ],
+      },
+    },
+  });
+  const c = new AgyConnector({
+    usageCache: testUsageCache(),
+    runUsage: async () => usageJson,
+  });
+  // Default (Gemini): 100 - 80 = 20%
+  assert.equal(await c.usagePercent(), 20);
+  assert.equal(await c.usagePercent("gemini-3.8-flash-high"), 20);
+  // Claude / GPT (3p): 100 - 40 = 60%
+  assert.equal(await c.usagePercent("claude-3-7-sonnet"), 60);
+  assert.equal(await c.usagePercent("gpt-4o"), 60);
+  // Argon: 100 - 10 = 90%
+  assert.equal(await c.usagePercent("gemini-4-argon"), 90);
+});
+
+test("detect caches --version across invocations within the usage interval", async () => {
+  let now = 1000000;
+  let versionCalls = 0;
+  const c = new AgyConnector({
+    usageCache: testUsageCache(),
+    now: () => now,
+    executeCommand: async (_cmd, args) => {
+      if (args.includes("--version")) {
+        versionCalls++;
+        return "agy 2.0.0";
+      }
+      return "";
+    },
+    runUsage: async () =>
+      JSON.stringify({
+        status: "SUCCESS",
+        command: {
+          data: {
+            groups: [
+              {
+                name: "Gemini Models",
+                buckets: [
+                  {
+                    window: "5h",
+                    remaining_fraction: 0.8,
+                    reset_time: "2026-11-08T00:00:00Z",
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      }),
+  });
+  const res1 = await c.detect();
+  assert.equal(res1.available, true);
+  assert.equal(res1.version, "agy 2.0.0");
+  assert.equal(versionCalls, 1);
+
+  // Calling detect again within the 15-minute usage interval does not spawn agy --version
+  now += 300000; // 5 minutes
+  const res2 = await c.detect();
+  assert.equal(res2.available, true);
+  assert.equal(res2.version, "agy 2.0.0");
+  assert.equal(versionCalls, 1);
+
+  // Advancing past the 15-minute interval (900,000 ms) refreshes version
+  now += 600001; // total 900,001 ms
+  const res3 = await c.detect();
+  assert.equal(res3.available, true);
+  assert.equal(res3.version, "agy 2.0.0");
+  assert.equal(versionCalls, 2);
 });

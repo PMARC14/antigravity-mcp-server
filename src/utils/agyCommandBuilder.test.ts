@@ -29,8 +29,10 @@ for (const mode of ["read", "write", "full"] as const) {
       const settings = JSON.parse(
         result.args[result.args.indexOf("--settings") + 1],
       );
-      assert.ok(settings.permissions.allow.includes("command(git diff*)"));
-      assert.ok(!settings.permissions.allow.includes("command(*)"));
+      assert.ok(settings.permissions.allow.includes("read_file(*)"));
+      assert.ok(settings.permissions.allow.includes("list_dir(*)"));
+      assert.ok(!settings.permissions.allow.some((r: string) => r.startsWith("command(")));
+      assert.equal(result.args.includes("--dangerously-skip-permissions"), false);
     } else {
       assert.equal(result.stdin, first);
     }
@@ -290,4 +292,36 @@ test("createAgyStdinPlan closes stdin when stderr line starts with AGY_ERROR:", 
       `Mode ${mode} must close stdin on AGY_ERROR`,
     );
   }
+});
+
+test("read mode on Windows uses file read permissions, drops shell command rules, and never skips permissions", async () => {
+  const result = await builder.build("Inspect codebase", { mode: "read" });
+  const settingsArg = result.args[result.args.indexOf("--settings") + 1];
+  assert.ok(settingsArg, "read mode must provide --settings");
+  const settings = JSON.parse(settingsArg);
+  assert.ok(settings.permissions.allow.includes("read_file(*)"), "must allow read_file(*)");
+  assert.ok(settings.permissions.allow.includes("list_dir(*)"), "must allow list_dir(*)");
+  assert.ok(settings.permissions.allow.includes("mcp(agent_bridge/*)"), "must allow mcp(agent_bridge/*)");
+  assert.ok(
+    !settings.permissions.allow.some((rule: string) => rule.startsWith("command(")),
+    "read mode must not include any command(...) rules",
+  );
+  assert.equal(
+    result.args.includes("--dangerously-skip-permissions"),
+    false,
+    "read mode must never use --dangerously-skip-permissions",
+  );
+});
+
+test("full mode omits --settings permission rules when --dangerously-skip-permissions is active", async () => {
+  const result = await builder.build("Run full command", { mode: "full" });
+  assert.ok(
+    result.args.includes("--dangerously-skip-permissions"),
+    "full mode must include --dangerously-skip-permissions",
+  );
+  assert.equal(
+    result.args.includes("--settings"),
+    false,
+    "full mode must not pass --settings alongside --dangerously-skip-permissions",
+  );
 });

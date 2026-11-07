@@ -12,7 +12,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsc && node dist/index.js",
-    "test": "npm run build && node --test \"dist/**/*.test.js\"",
+    "test": "npm run build && node -e \"const fs = require('fs'), path = require('path'); if (!process.env.AGENT_JOBS_MIRROR) { for (const p of ['../../codex-mcp-tool/src/jobs', '../codex-mcp-tool/src/jobs']) { if (fs.existsSync(p)) { process.env.AGENT_JOBS_MIRROR = path.resolve(p); break; } } } const { spawnSync } = require('child_process'); const r = spawnSync(process.execPath, ['--test', 'dist/**/*.test.js'], { stdio: 'inherit', env: process.env }); process.exit(r.status ?? 1);\"",
     "lint": "tsc --noEmit",
     "format": "prettier --write \"src/**/*.{ts,js,json,md}\" \"*.{md,json}\"",
     "format:check": "prettier --check \"src/**/*.{ts,js,json,md}\" \"*.{md,json}\"",

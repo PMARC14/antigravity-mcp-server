@@ -15,6 +15,10 @@ fi
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 bridge="$repo_root/dist/bridge/agent-bridge.js"
+if [[ "$mode" == "install" && ! -f "$bridge" ]]; then
+  echo "run npm run build first" >&2
+  exit 1
+fi
 config="${AGY_MCP_CONFIG_PATH:-}"
 if command -v cygpath >/dev/null 2>&1; then
   bridge="$(cygpath -w "$bridge")"
@@ -30,7 +34,12 @@ function main() {
 const [, , mode, bridgeArg, override] = process.argv;
 const bridge = path.resolve(bridgeArg);
 const configPath = path.resolve(override || path.join(os.homedir(), ".gemini", "config", "mcp_config.json"));
-if (mode === "install" && !fs.statSync(bridge).isFile()) throw new Error("Build the bridge with npm run build first");
+if (mode === "install") {
+  if (!fs.existsSync(bridge) || !fs.statSync(bridge).isFile()) {
+    console.error("run npm run build first");
+    process.exit(1);
+  }
+}
 fs.mkdirSync(path.dirname(configPath), { recursive: true });
 const lockPath = configPath + ".agent-bridge.lock";
 const lock = fs.openSync(lockPath, "wx", 0o600);

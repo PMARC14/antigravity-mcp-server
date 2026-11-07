@@ -295,7 +295,7 @@ test("paused tasks stay working until reset, and superseded jobs name their repl
     await until(() => s.store.get(taskId).state === "paused");
     const paused = await s.rpc("tasks/get", { taskId });
     assert.equal(paused.status, "working");
-    assert.match(paused.statusMessage, /Paused until /);
+    assert.match(paused.statusMessage, /paused until .* will retry/);
     assert.ok(
       paused.statusMessage.includes(
         new Date(s.store.get(taskId).resetAt!).toISOString(),
@@ -416,7 +416,9 @@ test("modern discovery, extension opt-in, task get, and complete envelopes match
     assert.deepEqual(s.initialized.supportedVersions, [MODERN_PROTOCOL]);
     assert.deepEqual(s.initialized.capabilities.extensions[TASK_EXTENSION], {});
     assert.equal(s.initialized.capabilities.tasks, undefined);
-    assert.equal(s.initialized.resultType, "complete");
+    // server/discover is not a tool result: no resultType/ttlMs/cacheScope envelope.
+    for (const field of ["resultType", "ttlMs", "cacheScope"])
+      assert.equal(s.initialized[field], undefined);
     const tools = await s.rpc("tools/list");
     assert.equal(tools.resultType, "complete");
     assert.equal(tools.ttlMs, 0);
@@ -455,7 +457,7 @@ test("modern discovery, extension opt-in, task get, and complete envelopes match
   }
 });
 
-test("failed and lost jobs map to failed, and pause without reset remains working", async () => {
+test("failed and lost jobs map to failed, and a pause that will not auto-retry is failed with quota_exhausted", async () => {
   const s = await setup();
   try {
     for (const state of ["failed", "lost", "paused", "queued"] as const) {
@@ -471,11 +473,22 @@ test("failed and lost jobs map to failed, and pause without reset remains workin
       const task = await s.rpc("tasks/get", { taskId: `seed-${state}` });
       assert.equal(
         task.status,
-        ["failed", "lost"].includes(state) ? "failed" : "working",
+        ["failed", "lost", "paused"].includes(state) ? "failed" : "working",
       );
       if (state === "paused")
-        assert.match(task.statusMessage, /reset time unknown/);
+        assert.match(task.statusMessage, /quota_exhausted/);
     }
+    const modernPaused = clientTaskGet.parse(
+      (
+        await s.raw("tasks/get", {
+          taskId: "seed-paused",
+          _meta: modernMeta(),
+        })
+      ).result,
+    ) as any;
+    assert.equal(modernPaused.status, "failed");
+    assert.match(modernPaused.error.message, /^quota_exhausted/);
+    assert.equal(modernPaused.result, undefined);
   } finally {
     await s.cleanup();
     s.f.cleanup();
@@ -507,7 +520,7 @@ test("task notifications follow derived approval status and suppress unchanged p
   try {
     const job = meta(f.home, { connector: "agy", state: "running" });
     store.create(job, "fake");
-    await tasks.call("agy_agent_follow", { jobId: job.id });
+    await tasks.call("agy_agent_follow", { jobId: job.id }, modernMeta());
     const approval = {
       id: "a",
       kind: "commandExecution",
@@ -517,12 +530,16 @@ test("task notifications follow derived approval status and suppress unchanged p
     store.write({ ...job, pendingApproval: approval });
     store.write({ ...job, pendingApproval: approval });
     store.write(job);
-    store.write({ ...job, state: "paused" });
+    const resetAt = Date.now() + 3600000;
+    store.write({ ...job, state: "paused", resetAt });
+    store.write({ ...job, state: "paused", resetAt: undefined });
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.deepEqual(
       notices.map((n) => n.params.status),
-      ["input_required", "working"],
+      ["input_required", "working", "working", "failed"],
     );
+    assert.match(notices[2].params.statusMessage, /paused until .* will retry/);
+    assert.match(notices[3].params.error.message, /^quota_exhausted/);
     notices.forEach((notice) => clientTaskNotification.parse(notice));
   } finally {
     tasks.close();
@@ -583,5 +600,68 @@ test("modern task projections never collect results or suppress the hook wake", 
   } finally {
     await s.cleanup();
     s.f.cleanup();
+  }
+});
+
+test("status notifications follow the negotiated era, and failed list entries carry no payload", async () => {
+  const f = fixture();
+  const store = new JobStore(f.home);
+  const notices: any[] = [];
+  let results = 0;
+  const manager = {
+    connector: { id: "agy" },
+    store,
+    onTransition: store.onWrite.bind(store),
+    async result() {
+      results++;
+      return { final: "x" };
+    },
+  };
+  const handlers = new Map<string, any>();
+  const server = {
+    setRequestHandler(schema: any, handler: any) {
+      handlers.set(schema.shape?.method?.value ?? "x", handler);
+    },
+    async notification(value: any) {
+      notices.push(value);
+    },
+  };
+  const before = toolRegistry.length;
+  toolRegistry.push({
+    name: "agy_agent_follow",
+    zodSchema: z.object({ jobId: z.string() }),
+  } as any);
+  const tasks = registerMcpTasks(server as any, "agy", manager as any, {
+    capabilities: {},
+  });
+  try {
+    const legacy = meta(f.home, {
+      id: "legacy-job",
+      connector: "agy",
+      state: "running",
+    });
+    const modernJob = meta(f.home, {
+      id: "modern-job",
+      connector: "agy",
+      state: "running",
+    });
+    store.create(legacy, "p");
+    store.create(modernJob, "p");
+    await tasks.call("agy_agent_follow", { jobId: legacy.id });
+    await tasks.call("agy_agent_follow", { jobId: modernJob.id }, modernMeta());
+    store.write({ ...legacy, state: "failed" });
+    store.write({ ...modernJob, state: "failed" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const old = notices.find((n) => n.params.taskId === "legacy-job").params;
+    const next = notices.find((n) => n.params.taskId === "modern-job").params;
+    assert.equal(old.ttl, null);
+    assert.equal(old.ttlMs, undefined);
+    assert.equal(next.ttlMs, null);
+    assert.equal(next.ttl, undefined);
+    assert.equal(results, 0, "failed notifications never read payload files");
+  } finally {
+    tasks.close();
+    toolRegistry.splice(before);
+    f.cleanup();
   }
 });

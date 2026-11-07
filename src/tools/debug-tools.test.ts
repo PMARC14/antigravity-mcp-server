@@ -27,7 +27,7 @@ test("live selftest exercises the real adapter in-process without a CLI", async 
     const log = new TrafficLog("agy", home);
     const result = await runSelftest(log);
     assert.equal(result.pass, true, JSON.stringify(result.steps));
-    assert.equal(result.steps.length, 12);
+    assert.equal(result.steps.length, 13);
     assert.equal(result.logPath, log.path);
     const entries = log.tail(200).map((line) => JSON.parse(line));
     assert.ok(

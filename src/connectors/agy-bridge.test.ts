@@ -152,3 +152,19 @@ test("bridge without worker env advertises no tools and exits quietly on EOF", a
     if (child.exitCode === null) child.kill();
   }
 });
+
+test("global bridge installer prints run npm run build first when dist is not built", () => {
+  const dir = mkdtempSync(join(tmpdir(), "agy installer unbuilt "));
+  const config = join(dir, "mcp_config.json");
+  const fakeScript = join(dir, "install-agy-bridge.sh");
+  const scriptContent = readFileSync(installer, "utf8");
+  writeFileSync(fakeScript, scriptContent);
+  const result = spawn.sync(bash, [fakeScript.replace(/\\/g, "/")], {
+    env: { ...process.env, AGY_MCP_CONFIG_PATH: config },
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /run npm run build first/);
+  assert.doesNotMatch(result.stderr, /ENOENT/);
+});

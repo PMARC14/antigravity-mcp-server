@@ -11,6 +11,9 @@ import { executeCommandDetailed } from "./commandExecutor.js";
 import { resolveExecutable } from "./processSpawner.js";
 import { executeAgy } from "./agyExecutor.js";
 import { readStdinPlan, READ_FINAL_TURN } from "./agyCommandBuilder.js";
+import { spawnStats } from "../jobs/spawn-stats.js";
+
+const FIXTURE = process.execPath;
 
 function fakeSpawn(
   t: { after: (fn: () => void) => void },
@@ -46,7 +49,7 @@ test("spawns hidden with no shell and ignores stdin without input", async (t) =>
     child.stdout?.emit("data", Buffer.from("hello\n"));
     child.emit("close", 0, null);
   });
-  const result = await executeCommandDetailed("fixture", []);
+  const result = await executeCommandDetailed(FIXTURE, []);
   assert.equal(result.ok, true);
   assert.equal(result.stdout, "hello");
 });
@@ -59,7 +62,7 @@ test("writes stdin once, closes it, and preserves patch whitespace on request", 
     child.stdout?.emit("data", Buffer.from(" patch\n"));
     child.emit("close", 0, null);
   });
-  const result = await executeCommandDetailed("fixture", [], {
+  const result = await executeCommandDetailed(FIXTURE, [], {
     stdin: "prompt\n",
     trimOutput: false,
   });
@@ -88,7 +91,7 @@ test("stdin EPIPE is handled even when the child exits successfully", async (t) 
     );
     child.emit("close", 0, null);
   });
-  const result = await executeCommandDetailed("fixture", [], {
+  const result = await executeCommandDetailed(FIXTURE, [], {
     stdin: "prompt\n",
   });
   assert.equal(result.ok, true);
@@ -104,7 +107,7 @@ test("synchronous spawn errors are handled", async (t) => {
     mock.restoreAll();
     syncBuiltinESMExports();
   });
-  const result = await executeCommandDetailed("fixture", []);
+  const result = await executeCommandDetailed(FIXTURE, []);
   assert.equal(result.ok, false);
   assert.match(result.stderr, /invalid cwd/);
 });
@@ -176,7 +179,7 @@ test("read mode with no result times out and closes stdin before killing", async
       return true;
     } });
   });
-  const result = await executeCommandDetailed("fixture", [], {
+  const result = await executeCommandDetailed(FIXTURE, [], {
     stdin: "first\n", stdinPlan: readStdinPlan, timeoutMs: 30,
   });
   assert.equal(result.timedOut, true);
@@ -193,7 +196,7 @@ test("read recovery safely ignores a synchronous EPIPE", async t => {
     assert.equal(input.writableEnded, true);
     child.emit("close", 0, null);
   });
-  const result = await executeCommandDetailed("fixture", [], { stdin: "first\n", stdinPlan: readStdinPlan });
+  const result = await executeCommandDetailed(FIXTURE, [], { stdin: "first\n", stdinPlan: readStdinPlan });
   assert.equal(result.ok, true);
 });
 
@@ -209,7 +212,7 @@ test("a retried read process gets a fresh first-result decision", async t => {
     assert.equal(input.writableEnded, true);
     child.emit("close", attempts === 1 ? 75 : 0, null);
   });
-  const result = await executeCommandDetailed("fixture", [], {
+  const result = await executeCommandDetailed(FIXTURE, [], {
     stdin: "first\n", stdinPlan: readStdinPlan,
     retry: { attempts: 2, backoffMs: 1, retryOn: ["transient"] },
   });
@@ -233,11 +236,22 @@ test("a fake agy that writes AGY_ERROR to stderr and waits on stdin finishes pro
       ),
     );
   });
-  const result = await executeCommandDetailed("fixture", [], {
+  const result = await executeCommandDetailed(FIXTURE, [], {
     stdin: "first\n",
     stdinPlan: readStdinPlan,
     timeoutMs: 50,
   });
   assert.equal(stdinClosed, true);
   assert.equal(result.timedOut, false);
+});
+
+test("all agy spawns use the no-console launcher on Windows (spawnStats.viaLauncher)", async () => {
+  if (process.platform !== "win32") return;
+  const before = spawnStats.viaLauncher;
+  const result = await executeCommandDetailed(process.execPath, ["--version"]);
+  assert.equal(result.ok, true);
+  assert.ok(
+    spawnStats.viaLauncher > before,
+    "executeCommandDetailed must spawn via launcher on Windows",
+  );
 });

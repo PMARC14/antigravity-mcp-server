@@ -69,7 +69,7 @@ test("background spawn persists full prompts and separate streams with safe defa
   assert.equal(meta.state, "running");
   assert.equal(meta.pid, process.pid);
   assert.equal(spawnOptions!.windowsHide, true);
-  assert.equal(spawnOptions!.detached, process.platform !== "win32");
+  assert.equal(Boolean(spawnOptions!.detached), process.platform !== "win32");
   assert.ok(meta.args.includes("--sandbox"));
   assert.ok(!meta.args.includes("--dangerously-skip-permissions"));
   assert.equal(readFileSync(meta.promptFile!, "utf8"), prompt);

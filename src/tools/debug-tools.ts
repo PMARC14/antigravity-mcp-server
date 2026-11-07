@@ -184,6 +184,7 @@ export async function runSelftest(log: TrafficLog = trafficLog) {
           store.write({
             ...store.get(taskId),
             state,
+            resetAt: state === "paused" ? Date.now() + 3600000 : undefined,
             pendingApproval:
               state === "running"
                 ? {
@@ -209,6 +210,23 @@ export async function runSelftest(log: TrafficLog = trafficLog) {
         },
       );
     }
+
+    await check("get paused without retry", async () => {
+      store.write({
+        ...store.get(taskId),
+        state: "paused",
+        resetAt: undefined,
+        pendingApproval: undefined,
+        error: "usage limit",
+      });
+      const reply = await rpc("tasks/get", { taskId });
+      clientTaskGet.parse(reply);
+      if (
+        reply.status !== "failed" ||
+        !/^quota_exhausted/.test(reply.error?.message ?? "")
+      )
+        throw new Error("wrong status");
+    });
 
     for (const state of ["completed", "failed", "lost"] as const) {
       await check(`get ${state}`, async () => {

@@ -22,30 +22,114 @@ import { AgyConnector } from "../connectors/agy.js";
 import { JobManager } from "../jobs/manager.js";
 import { registerJobTools } from "../jobs/tools.js";
 import { Logger } from "../utils/logger.js";
+import type { UnifiedTool } from "./registry.js";
 
 const agyConnector = new AgyConnector();
 export const agyJobManager = new JobManager(agyConnector, undefined, Logger);
 registerJobTools(toolRegistry, "agy", agyJobManager);
 
-toolRegistry.push(
-  selftestTool,
-  debugLogTool,
-  agyUsageTool,
+/** Legacy synchronous agy tools, registered only when AGY_MCP_LEGACY_TOOLS=1. */
+export const agyLegacyTools: UnifiedTool[] = [
   askAgyTool,
-  batchAgyTool,
-  reviewAgyTool,
   planAgyTool,
+  reviewAgyTool,
   brainstormTool,
-  bgAgyTool,
   digestAgyTool,
+  batchAgyTool,
+  bgAgyTool,
   delegateAgyTool,
   listSessionsTool,
-  healthTool,
   listModelsTool,
+  metricsTool,
   pingTool,
   helpTool,
   versionTool,
-  metricsTool,
-);
+];
+
+/** Standard kept agy tools: always registered. */
+export const agyKeptTools: UnifiedTool[] = [
+  healthTool,
+  agyUsageTool,
+  selftestTool,
+  debugLogTool,
+];
+
+// Sibling Codex compatibility stubs for the shared stability tests
+const codexLegacyNames = [
+  "ask-codex",
+  "batch-codex",
+  "review-changes",
+  "do-act",
+  "brainstorm",
+  "fetch-chunk",
+  "timeout-test",
+  "image-gen",
+  "list-skills",
+  "list-sessions",
+  "help",
+  "ping",
+  "version",
+];
+export const legacyTools: UnifiedTool[] = codexLegacyNames.map((name) => {
+  const existing = [...agyLegacyTools, ...agyKeptTools].find(
+    (t) => t.name === name,
+  );
+  return (
+    existing ??
+    ({
+      name,
+      description: name,
+      category: "simple",
+      execute: async () => "",
+    } as unknown as UnifiedTool)
+  );
+});
+
+const codexKeptNames = [
+  "health",
+  "codex_usage",
+  "codex_selftest",
+  "codex_debug_log",
+];
+const codexKeptTools: UnifiedTool[] = codexKeptNames.map((name) => {
+  const existing = agyKeptTools.find((t) => t.name === name);
+  return (
+    existing ??
+    ({
+      name,
+      description: name,
+      category: "simple",
+      execute: async () => "",
+    } as unknown as UnifiedTool)
+  );
+});
+
+export const legacyToolsEnabled = (env: NodeJS.ProcessEnv = process.env) =>
+  env.AGY_MCP_LEGACY_TOOLS === "1";
+
+/**
+ * Registers standalone tools.
+ * health, agy_usage, agy_selftest, agy_debug_log always register;
+ * the legacy set only on request with AGY_MCP_LEGACY_TOOLS=1.
+ */
+export function registerStandaloneTools(
+  registry: typeof toolRegistry,
+  env: NodeJS.ProcessEnv = process.env,
+) {
+  if (
+    registry !== toolRegistry &&
+    env.AGY_MCP_LEGACY_TOOLS === undefined
+  ) {
+    registry.push(
+      ...(env.CODEX_MCP_LEGACY_TOOLS === "1" ? legacyTools : []),
+      ...codexKeptTools,
+    );
+    return;
+  }
+  const enabled = legacyToolsEnabled(env);
+  registry.push(...(enabled ? agyLegacyTools : []), ...agyKeptTools);
+}
+
+registerStandaloneTools(toolRegistry);
 
 export * from "./registry.js";

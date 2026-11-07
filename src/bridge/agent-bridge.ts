@@ -12,7 +12,11 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { atomicWrite } from "../jobs/store.js";
-import { claimQuestion, releaseQuestion } from "../jobs/question-claim.js";
+import {
+  claimQuestion,
+  readAnswerFile,
+  releaseQuestion,
+} from "../jobs/question-claim.js";
 
 const askSchema = z.object({
   question: z.string().trim().min(1).max(20000),
@@ -129,26 +133,31 @@ export function createBridge(home?: string, jobId?: string) {
             new McpError(ErrorCode.InvalidRequest, "Bridge question cancelled"),
           );
         };
+        const readAnswer = () => readAnswerFile(answerPath);
         const check = () => {
           try {
-            // stat only on each tick; read the answer once it exists.
-            if (!statSync(answerPath).isFile()) return;
-            const answer = JSON.parse(readFileSync(answerPath, "utf8"));
-            if (typeof answer.answer !== "string")
-              throw new Error("answer field must be a string");
+            const answer = readAnswer();
+            if (answer === undefined) return;
             cleanup();
-            resolveAnswer(answer.answer);
+            resolveAnswer(answer);
           } catch (error) {
-            if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
             cleanup();
             reject(error);
           }
         };
         timer = setInterval(check, 2000);
         deadline = setTimeout(() => {
+          // An answer that arrived since the last poll still wins over the fallback text.
+          let late: string | undefined;
+          try {
+            late = readAnswer();
+          } catch {
+            late = undefined;
+          }
           cleanup();
           resolveAnswer(
-            `no answer within ${timeoutSec} s; continue with your best judgement`,
+            late ??
+              `no answer within ${timeoutSec} s; continue with your best judgement`,
           );
         }, timeoutSec * 1000);
         extra.signal.addEventListener("abort", abort, { once: true });

@@ -82,18 +82,10 @@ export function resolveAgyMode(
 /** Read-only tool permissions allowed in headless runs to prevent aborting on reads. */
 export const FILE_READ_PERMISSIONS = ["read_file(*)", "list_dir(*)"];
 
-/** Read-only commands a read-mode run may use without a prompt. */
-export const READ_ONLY_COMMANDS = [
-  "command(git status*)",
-  "command(git diff*)",
-  "command(git log*)",
-  "command(git show*)",
-  "command(rg *)",
-  "command(Get-ChildItem*)",
-  "command(Get-Content*)",
-  "command(ls*)",
-  "command(cat *)",
-];
+/** Read-only commands a read-mode run may use without a prompt.
+ * Shell rules are dropped on Windows and in general because agy permission checks
+ * fail on unsandboxed command arguments; read mode relies on read_file and list_dir. */
+export const READ_ONLY_COMMANDS: string[] = [];
 
 /** Steers read-mode runs away from shell commands, which can abort the run. */
 export const READ_PREFIX =
@@ -210,11 +202,7 @@ export class AgyCommandBuilder {
     const mode = resolveAgyMode(options);
     const args = [CLI.FLAGS.MODEL, options.model ?? DEFAULT_MODEL];
     if (mode === "full") {
-      args.push(
-        CLI.FLAGS.SKIP_PERMISSIONS,
-        "--settings",
-        JSON.stringify({ permissions: { allow: ["mcp(agent_bridge/*)"] } }),
-      );
+      args.push(CLI.FLAGS.SKIP_PERMISSIONS);
     } else if (mode === "write" || mode === "trusted") {
       args.push(CLI.FLAGS.MODE, "accept-edits");
       if (mode === "write") args.push(CLI.FLAGS.SANDBOX);

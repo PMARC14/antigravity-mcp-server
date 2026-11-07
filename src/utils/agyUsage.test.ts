@@ -10,7 +10,7 @@ import {
 } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { computeAgyUsage, fetchAgyQuota, parseAgyQuota } from "./agyUsage.js";
+import { computeAgyUsage, fetchAgyQuota, getAgyUsage, parseAgyQuota } from "./agyUsage.js";
 
 const NOW = Date.parse("2026-10-31T18:00:00Z");
 const bucket = (
@@ -143,7 +143,7 @@ test("shared cache caps refresh requests and writes status file only when its di
     );
     assert.equal(file.taken_at, Math.floor(NOW / 1000));
     assert.equal(file.groups.length, 3);
-    await fetchAgyQuota({ ...options, now: NOW + 300000 });
+    await fetchAgyQuota({ ...options, now: NOW + 900000 });
     assert.equal(calls, 2);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -196,5 +196,51 @@ test("optional tallies sum tokens per model from a fake store", () => {
     );
   } finally {
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("negative sign-in results expire after 60s and re-probe immediately on explicit agy_usage call", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "agy-neg-"));
+  try {
+    let now = 1000000;
+    let calls = 0;
+    const run = async () => {
+      calls++;
+      return 'AGY_ERROR: {"status":"UNAUTHENTICATED","short_error":"not signed in"}';
+    };
+    // 1. Initial probe returns signed out and caches
+    const res1 = await getAgyUsage({ run, now, usageCache: { home: dir } });
+    assert.equal(res1?.ok, false);
+    assert.equal(calls, 1);
+
+    // 2. Probing at 30s (under 60s) reuses the negative cache
+    now += 30000;
+    const res2 = await getAgyUsage({ run, now, usageCache: { home: dir } });
+    assert.equal(res2?.ok, false);
+    assert.equal(calls, 1);
+
+    // 3. Explicit call re-probes immediately even before 60s
+    const resExplicit = await getAgyUsage({
+      run,
+      now,
+      explicit: true,
+      usageCache: { home: dir },
+    });
+    assert.equal(resExplicit?.ok, false);
+    assert.equal(calls, 2);
+
+    // 4. Another call within 60s of the second probe reuses the cache
+    now += 30000;
+    const res3 = await getAgyUsage({ run, now, usageCache: { home: dir } });
+    assert.equal(res3?.ok, false);
+    assert.equal(calls, 2);
+
+    // 5. Advancing past 60s expires the negative cache and re-probes
+    now += 31000; // now is 61s past the second probe
+    const res4 = await getAgyUsage({ run, now, usageCache: { home: dir } });
+    assert.equal(res4?.ok, false);
+    assert.equal(calls, 3);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

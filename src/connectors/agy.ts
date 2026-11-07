@@ -7,9 +7,12 @@ import { executeCommand } from "../utils/commandExecutor.js";
 import { fetchModels } from "../utils/modelList.js";
 import type { UsageCacheOptions } from "../jobs/usage-cache.js";
 import { CLI, DEFAULT_MODEL, MODELS, REVIEW_MODEL } from "../constants.js";
+import { usageIntervals } from "../jobs/config.js";
 import {
   fetchAgyQuota,
   getAgyUsage,
+  isUnauthenticated,
+  type UsageGroup,
   type UsageRunner,
 } from "../utils/agyUsage.js";
 
@@ -19,6 +22,7 @@ const DENIED_PATTERN = /no output produced.*auto-denied/i;
 
 // Vendor-neutral reset formats, including minute-precision local clocks.
 export { usageReset as agyUsageReset } from "../jobs/usage-reset.js";
+export { isUnauthenticated } from "../utils/agyUsage.js";
 import {
   usageLimit,
   usageReset as agyUsageReset,
@@ -29,80 +33,6 @@ function quotaEvent(message: string): JobEvent {
     error: message,
     usageLimit: usageLimit(message),
   };
-}
-
-export function isUnauthenticated(raw: string): boolean {
-  if (!raw) return false;
-  const trimmed = raw.trim();
-  if (!trimmed) return false;
-
-  for (const line of trimmed.split("\n")) {
-    const t = line.trim();
-    if (t.startsWith("AGY_ERROR:")) {
-      try {
-        const data = JSON.parse(t.slice("AGY_ERROR:".length).trim());
-        if (
-          String(data?.status).toUpperCase() === "UNAUTHENTICATED" ||
-          data?.error_code === 401 ||
-          data?.error_code === "401"
-        ) {
-          return true;
-        }
-        const text = `${data?.short_error ?? ""} ${data?.error ?? ""}`;
-        if (
-          /unauthenticated|not authenticated|sign[ -]?in|login|unauthorized|\b401\b/i.test(
-            text,
-          )
-        ) {
-          return true;
-        }
-      } catch {
-        /* fall through */
-      }
-    }
-  }
-
-  try {
-    const data = JSON.parse(trimmed);
-    if (
-      String(data?.status).toUpperCase() === "SUCCESS" ||
-      data?.command?.data?.groups ||
-      data?.groups ||
-      data?.quotaGroups ||
-      data?.quota_groups
-    ) {
-      return false;
-    }
-    if (
-      String(data?.status).toUpperCase() === "UNAUTHENTICATED" ||
-      data?.error_code === 401 ||
-      data?.error_code === "401" ||
-      data?.code === 401
-    ) {
-      return true;
-    }
-    const text = `${data?.response ?? ""} ${data?.error ?? ""} ${data?.message ?? ""} ${data?.short_error ?? ""}`;
-    if (
-      /unauthenticated|not authenticated|sign[ -]?in|login|unauthorized|\b401\b/i.test(
-        text,
-      )
-    ) {
-      return true;
-    }
-    return false;
-  } catch {
-    /* not JSON */
-  }
-
-  if (
-    /unauthenticated|not authenticated|not signed in|please sign in|sign in again|\b401\b/i.test(
-      trimmed,
-    )
-  ) {
-    return true;
-  }
-
-  return false;
 }
 
 export interface AgyConnectorOptions {
@@ -117,13 +47,16 @@ export interface AgyConnectorOptions {
   usageCache?: UsageCacheOptions;
   /** Global config override for isolated tests; agy itself always reads the global path. */
   mcpConfigPath?: string;
+  defaultModel?: string;
 }
 
 export class AgyConnector implements Connector {
   readonly id = "agy";
-  readonly defaultModel = DEFAULT_MODEL;
+  readonly defaultModel: string;
   readonly reviewModel = REVIEW_MODEL;
   private readonly mcpConfigPath: string;
+  private cachedVersion?: string;
+  private versionTimestamp = 0;
   bridgeInstalled(): boolean {
     try {
       const entry = JSON.parse(readFileSync(this.mcpConfigPath, "utf8"))
@@ -149,6 +82,7 @@ export class AgyConnector implements Connector {
   private readonly usageCache: UsageCacheOptions;
 
   constructor(options: AgyConnectorOptions = {}) {
+    this.defaultModel = options.defaultModel ?? DEFAULT_MODEL;
     this.runUsage = options.runUsage;
     this.executeCmd = options.executeCommand ?? executeCommand;
     this.now = options.now ?? Date.now;
@@ -158,14 +92,28 @@ export class AgyConnector implements Connector {
       join(homedir(), ".gemini", "config", "mcp_config.json");
   }
 
+  async refreshUsage(): Promise<void> {
+    await getAgyUsage({
+      run: this.runUsage,
+      now: this.now(),
+      usageCache: { ...this.usageCache, force: true },
+    });
+  }
+
   async detect(): ReturnType<Connector["detect"]> {
-    let version = "";
-    try {
-      version = (
-        await this.executeCmd(CLI.COMMANDS.AGY, ["--version"], undefined, 5000)
-      ).trim();
-    } catch {
-      /* fall through */
+    const now = this.now();
+    const ttl = usageIntervals().intervalMs;
+    let version = this.cachedVersion;
+    if (!version || now - this.versionTimestamp >= ttl) {
+      try {
+        version = (
+          await this.executeCmd(CLI.COMMANDS.AGY, ["--version"], undefined, 5000)
+        ).trim();
+        this.cachedVersion = version;
+        this.versionTimestamp = now;
+      } catch {
+        /* fall through */
+      }
     }
     if (!version) {
       return {
@@ -182,6 +130,7 @@ export class AgyConnector implements Connector {
     });
     if (
       usage &&
+      !usage.ok &&
       isUnauthenticated(typeof usage.raw === "string" ? usage.raw : "")
     ) {
       return {
@@ -244,11 +193,11 @@ export class AgyConnector implements Connector {
 
   /**
    * Returns the max used percent across the 5-hour and weekly windows of the
-   * model group the job would use. Jobs default to DEFAULT_MODEL (Gemini),
-   * so this inspects the Gemini model group.
+   * model group matching the job's model. Argon jobs use Argon; Claude/GPT use 3p;
+   * others default to Gemini.
    * Returns undefined on any error.
    */
-  async usagePercent(): Promise<number | undefined> {
+  async usagePercent(model?: string): Promise<number | undefined> {
     try {
       const quota = await fetchAgyQuota({
         run: this.runUsage,
@@ -256,11 +205,22 @@ export class AgyConnector implements Connector {
         usageCache: this.usageCache,
       });
       if (!quota?.available) return undefined;
-      // Jobs default to DEFAULT_MODEL (gemini-3.8-flash-high), so inspect the Gemini model group.
-      const group =
-        quota.groups.find((g) => g.short === "gem") ??
-        quota.groups.find((g) => /gemini/i.test(g.name)) ??
-        quota.groups[0];
+      const targetModel = model ?? this.defaultModel;
+      let group: UsageGroup | undefined;
+      if (/argon/i.test(targetModel)) {
+        group =
+          quota.groups.find((g) => g.short === "argon") ??
+          quota.groups.find((g) => /argon/i.test(g.name));
+      } else if (/claude|gpt/i.test(targetModel)) {
+        group =
+          quota.groups.find((g) => g.short === "3p") ??
+          quota.groups.find((g) => /claude|gpt/i.test(g.name));
+      } else {
+        group =
+          quota.groups.find((g) => g.short === "gem") ??
+          quota.groups.find((g) => /gemini/i.test(g.name));
+      }
+      group = group ?? quota.groups[0];
       if (!group) return undefined;
       const percents: number[] = [];
       if (typeof group.fiveHour?.usedPercent === "number") {

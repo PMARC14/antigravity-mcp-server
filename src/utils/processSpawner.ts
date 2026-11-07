@@ -1,6 +1,7 @@
-import { spawn, SpawnOptions, ChildProcess } from "child_process";
+import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { existsSync, readFileSync } from "fs";
 import { delimiter, dirname, extname, isAbsolute, join, resolve } from "path";
+import { safeSpawn } from "../jobs/proc.js";
 
 /** Resolve npm shims to their script; prompts and settings never enter a shell. */
 export function resolveExecutable(
@@ -46,9 +47,5 @@ export function spawnCommand(
   options: SpawnOptions,
 ): ChildProcess {
   const resolved = resolveExecutable(command, args);
-  return spawn(resolved.command, resolved.args, {
-    ...options,
-    shell: false,
-    windowsHide: true,
-  });
+  return safeSpawn(resolved.command, resolved.args, options, true);
 }
