@@ -268,15 +268,17 @@ export async function getAgyUsage(options: FetchUsageOptions = {}) {
           cached?.ok === false &&
           isUnauthenticated(typeof cached.raw === "string" ? cached.raw : "")
         ) {
-          // Negative sign-in results must expire after 60 s, or be re-probed on an explicit agy_usage call
-          if (options.explicit || now - cached.takenAt >= 60000) {
+          // Negative sign-in results expire after 60 s; the automatic path keeps the file so
+          // concurrent readers see "signed out" until the new probe replaces it. An explicit
+          // agy_usage call (the user just signed in) must skip the 60 s probe gap, so it clears it.
+          if (options.explicit) {
             try {
               unlinkSync(cacheFile);
             } catch {
               /* ignore */
             }
             force = true;
-          }
+          } else if (now - cached.takenAt >= 60000) force = true;
         }
       } catch {
         /* ignore */
