@@ -325,3 +325,12 @@ test("full mode omits --settings permission rules when --dangerously-skip-permis
     "full mode must not pass --settings alongside --dangerously-skip-permissions",
   );
 });
+
+test("an explicit effort replaces the model's effort suffix; no effort keeps the name", async () => {
+  const model = (args: string[]) => args[args.indexOf("--model") + 1];
+  const withEffort = await builder.build("hi", { model: "gemini-4-argon-high", effort: "medium" });
+  assert.equal(model(withEffort.args), "gemini-4-argon");
+  assert.equal(withEffort.args[withEffort.args.indexOf("--effort") + 1], "medium");
+  assert.equal(model((await builder.build("hi", { model: "gemini-4-argon", effort: "low" })).args), "gemini-4-argon");
+  assert.equal(model((await builder.build("hi", { model: "gemini-4-argon-high" })).args), "gemini-4-argon-high");
+});

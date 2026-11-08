@@ -200,7 +200,12 @@ export class AgyCommandBuilder {
       );
     }
     const mode = resolveAgyMode(options);
-    const args = [CLI.FLAGS.MODEL, options.model ?? DEFAULT_MODEL];
+    // agy rejects --effort with an effort-suffixed model ("gemini-4-argon-high"); an explicit
+    // effort wins, so pass the base model ("gemini-4-argon") with it.
+    const model = options.effort
+      ? stripEffortSuffix(options.model ?? DEFAULT_MODEL)
+      : (options.model ?? DEFAULT_MODEL);
+    const args = [CLI.FLAGS.MODEL, model];
     if (mode === "full") {
       args.push(CLI.FLAGS.SKIP_PERMISSIONS);
     } else if (mode === "write" || mode === "trusted") {
@@ -288,4 +293,9 @@ export class AgyCommandBuilder {
       /* The CLI may not have created the log. */
     }
   }
+}
+
+/** "gemini-4-argon-high" -> "gemini-4-argon"; names without an effort suffix are unchanged. */
+export function stripEffortSuffix(model: string): string {
+  return model.replace(/-(?:low|medium|high|xhigh|max)$/i, "");
 }
