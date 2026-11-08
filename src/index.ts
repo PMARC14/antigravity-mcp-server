@@ -37,7 +37,7 @@ import {
 } from "./tools/index.js";
 import { getCompletionValues } from "./utils/completions.js";
 import { SERVER_VERSION } from "./version.js";
-import { executeJobWatch } from "./tools/job-watch-progress.js";
+import { executeJobWatch, needsJobWatch } from "./tools/job-watch-progress.js";
 import {
   registerMcpTasks,
   TaskStdioTransport,
@@ -200,7 +200,7 @@ server.setRequestHandler(
 
     if (toolExists(toolName)) {
       const progressToken = (request.params as any)._meta?.progressToken;
-      const watching = toolName === "agy_agent_follow";
+      const watching = needsJobWatch(toolName);
       const progressData = watching
         ? undefined
         : startProgressUpdates(toolName, progressToken);
@@ -214,6 +214,7 @@ server.setRequestHandler(
           ? await executeJobWatch(toolName, args, {
               progressToken,
               signal: extra.signal,
+              manager: agyJobManager,
               notify: (params) =>
                 extra.sendNotification({
                   method: PROTOCOL.NOTIFICATIONS.PROGRESS,
@@ -305,7 +306,6 @@ server.setRequestHandler(
 
 async function main() {
   Logger.debug("init antigravity-mcp-server");
-  await agyJobManager.initialize();
   const transport = new TaskStdioTransport("agy");
   server.onclose = () => {
     mcpTasks.close();
@@ -326,6 +326,9 @@ async function main() {
   process.stdout.once("error", disconnect);
   await server.connect(transport);
   Logger.debug("antigravity-mcp-server listening on stdio");
+  // Discovery must be served before recovery/lock/process inspection can delay startup.
+  // Job tools and task handlers await the same idempotent initialization promise.
+  await agyJobManager.initialize();
 }
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {

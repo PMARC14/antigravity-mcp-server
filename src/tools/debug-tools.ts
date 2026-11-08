@@ -45,6 +45,7 @@ export async function runSelftest(log: TrafficLog = trafficLog) {
     connector: { id: "agy" },
     store,
     onTransition: store.onWrite.bind(store),
+    async initialize() {},
     async start() {
       const id = randomUUID();
       const job: JobMeta = {
@@ -179,39 +180,33 @@ export async function runSelftest(log: TrafficLog = trafficLog) {
     });
     for (const state of ["queued", "paused", "running"] as const) {
       await check(
-        `get ${state === "running" ? "input_required" : state}`,
+        `get ${state === "running" ? "question" : state}`,
         async () => {
+          taskId = await start();
           store.write({
             ...store.get(taskId),
             state,
             resetAt: state === "paused" ? Date.now() + 3600000 : undefined,
-            pendingApproval:
+            awaitingInput:
               state === "running"
-                ? {
-                    id: "fake",
-                    kind: "userInput",
-                    summary: "fake question",
-                    requestedAt: Date.now(),
-                  }
+                ? { qid: "fake", question: "fake question", askedAt: Date.now() }
                 : undefined,
           });
           const reply = await rpc("tasks/get", { taskId });
           clientTaskGet.parse(reply);
-          if (
-            reply.status !==
-            (state === "running" ? "input_required" : "working")
-          )
+          if (reply.status !== (state === "queued" ? "working" : "completed"))
             throw new Error("wrong status");
           if (
             state === "running" &&
-            !reply.statusMessage.includes("awaiting answer")
+            JSON.parse(reply.result.content[0].text).event !== "question"
           )
-            throw new Error("missing awaiting answer");
+            throw new Error("missing question event");
         },
       );
     }
 
     await check("get paused without retry", async () => {
+      taskId = await start();
       store.write({
         ...store.get(taskId),
         state: "paused",
@@ -222,14 +217,15 @@ export async function runSelftest(log: TrafficLog = trafficLog) {
       const reply = await rpc("tasks/get", { taskId });
       clientTaskGet.parse(reply);
       if (
-        reply.status !== "failed" ||
-        !/^quota_exhausted/.test(reply.error?.message ?? "")
+        reply.status !== "completed" ||
+        JSON.parse(reply.result.content[0].text).event !== "paused"
       )
         throw new Error("wrong status");
     });
 
     for (const state of ["completed", "failed", "lost"] as const) {
       await check(`get ${state}`, async () => {
+        taskId = await start();
         store.write({
           ...store.get(taskId),
           state,
@@ -240,7 +236,10 @@ export async function runSelftest(log: TrafficLog = trafficLog) {
         const reply = await rpc("tasks/get", { taskId });
         clientTaskGet.parse(reply);
         CallToolResultSchema.parse(reply.result);
-        if (reply.status !== (state === "completed" ? "completed" : "failed"))
+        if (
+          reply.status !== "completed" ||
+          JSON.parse(reply.result.content[0].text).event !== "stopped"
+        )
           throw new Error("wrong status");
       });
     }
@@ -258,6 +257,17 @@ export async function runSelftest(log: TrafficLog = trafficLog) {
       await new Promise<void>((resolve) => setImmediate(resolve));
       if (!notices.length) throw new Error("no status notifications");
       notices.forEach((notice) => clientTaskNotification.parse(notice));
+      if (
+        JSON.stringify(notices).includes("elicitation/create") ||
+        notices.some(
+          (notice) =>
+            notice.params.inputRequests ||
+            notice.params.status === "input_required",
+        )
+      )
+        throw new Error(
+          "worker input must complete a task, never elicit a user form",
+        );
     });
     return { pass: steps.every((step) => step.pass), steps, logPath: log.path };
   } finally {

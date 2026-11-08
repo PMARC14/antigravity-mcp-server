@@ -256,27 +256,32 @@ export async function getAgyUsage(options: FetchUsageOptions = {}) {
     (options.usageCache?.now ? options.usageCache.now() : Date.now());
 
   let force = options.usageCache?.force;
-  if (existsSync(cacheFile)) {
-    try {
-      const cached = JSON.parse(readFileSync(cacheFile, "utf8"));
-      if (
-        cached?.ok === false &&
-        isUnauthenticated(typeof cached.raw === "string" ? cached.raw : "")
-      ) {
-        // Negative sign-in results must expire after 60 s, or be re-probed on an explicit agy_usage call
-        if (options.explicit || now - cached.takenAt >= 60000) {
-          try {
-            unlinkSync(cacheFile);
-          } catch {
-            /* ignore */
+  // A failed probe after a good one is kept in agy-usage.failure.json; check both.
+  for (const cacheFile of [
+    join(home, "cache", "agy-usage.failure.json"),
+    join(home, "cache", "agy-usage.json"),
+  ])
+    if (existsSync(cacheFile)) {
+      try {
+        const cached = JSON.parse(readFileSync(cacheFile, "utf8"));
+        if (
+          cached?.ok === false &&
+          isUnauthenticated(typeof cached.raw === "string" ? cached.raw : "")
+        ) {
+          // Negative sign-in results must expire after 60 s, or be re-probed on an explicit agy_usage call
+          if (options.explicit || now - cached.takenAt >= 60000) {
+            try {
+              unlinkSync(cacheFile);
+            } catch {
+              /* ignore */
+            }
+            force = true;
           }
-          force = true;
         }
+      } catch {
+        /* ignore */
       }
-    } catch {
-      /* ignore */
     }
-  }
 
   return getUsage<AgyQuota>(
     "agy",
