@@ -218,7 +218,7 @@ test("createAgyStdinPlan handles steer and result lifecycle", async () => {
     }),
     "stdout",
   );
-  assert.deepEqual(r2, { close: true });
+  assert.deepEqual(r2, { close: true, done: true });
 });
 
 test("createAgyStdinPlan closes stdin on first result when no steer is pending", () => {
@@ -232,7 +232,7 @@ test("createAgyStdinPlan closes stdin on first result when no steer is pending",
     }),
     "stdout",
   );
-  assert.deepEqual(r1, { close: true });
+  assert.deepEqual(r1, { close: true, done: true });
 });
 
 test("createAgyStdinPlan in read mode combines recovery with steering", async () => {
@@ -275,7 +275,7 @@ test("createAgyStdinPlan in read mode combines recovery with steering", async ()
     }),
     "stdout",
   );
-  assert.deepEqual(r3, { close: true });
+  assert.deepEqual(r3, { close: true, done: true });
 });
 
 test("createAgyStdinPlan closes stdin when stderr line starts with AGY_ERROR:", () => {
@@ -288,7 +288,7 @@ test("createAgyStdinPlan closes stdin when stderr line starts with AGY_ERROR:", 
     );
     assert.deepEqual(
       action,
-      { close: true },
+      { close: true, done: true },
       `Mode ${mode} must close stdin on AGY_ERROR`,
     );
   }
@@ -333,4 +333,18 @@ test("an explicit effort replaces the model's effort suffix; no effort keeps the
   assert.equal(withEffort.args[withEffort.args.indexOf("--effort") + 1], "medium");
   assert.equal(model((await builder.build("hi", { model: "gemini-4-argon", effort: "low" })).args), "gemini-4-argon");
   assert.equal(model((await builder.build("hi", { model: "gemini-4-argon-high" })).args), "gemini-4-argon-high");
+});
+
+test("read recovery closes stdin without done, so the final turn is not cut short", () => {
+  const handler = createAgyStdinPlan("read")({ apply: () => {}, emit: () => {} });
+  const first = handler(
+    JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "", denied_actions: [] } }),
+    "stdout",
+  );
+  assert.deepEqual(first, { write: userTurn(READ_FINAL_TURN), close: true });
+  const last = handler(
+    JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "final" } }),
+    "stdout",
+  );
+  assert.deepEqual(last, { close: true, done: true });
 });

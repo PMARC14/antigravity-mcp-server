@@ -117,7 +117,7 @@ export function createAgyStdinPlan(mode: AgyMode = "read"): StdinPlan {
     ): StdinAction | void => {
       if (stream === "stderr") {
         if (line.startsWith("AGY_ERROR:")) {
-          return { close: true };
+          return { close: true, done: true };
         }
         return;
       }
@@ -154,19 +154,19 @@ export function createAgyStdinPlan(mode: AgyMode = "read"): StdinPlan {
           return;
         }
 
-        return { close: true };
+        return { close: true, done: true };
       }
 
       // Subsequent results (from steer turns or recovery turns)
       if (pendingSteers > 0) {
         pendingSteers--;
         if (pendingSteers === 0) {
-          return { close: true };
+          return { close: true, done: true };
         }
         return;
       }
 
-      return { close: true };
+      return { close: true, done: true };
     };
 
     handler.onSteer = (message: string): SteerResult => {
