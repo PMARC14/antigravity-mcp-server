@@ -44,21 +44,13 @@ import {
   taskCapabilities,
 } from "./tools/mcp-tasks.js";
 
-import {
-  startChannelNotifier,
-  withChannelCapabilities,
-  withChannelInstructions,
-} from "./jobs/channel.js";
-
-const CHANNEL_INSTRUCTIONS = withChannelInstructions(undefined, "agy");
-let stopChannel = () => {};
-const capabilities = withChannelCapabilities({
+const capabilities = {
   tools: {},
   prompts: {},
   logging: {},
   completions: {},
   tasks: taskCapabilities,
-});
+};
 
 const server = new Server(
   {
@@ -67,13 +59,11 @@ const server = new Server(
   },
   {
     capabilities,
-    ...(CHANNEL_INSTRUCTIONS ? { instructions: CHANNEL_INSTRUCTIONS } : {}),
   },
 );
 installRequestErrorReporting(server);
 const mcpTasks = registerMcpTasks(server, "agy", agyJobManager, {
   capabilities,
-  instructions: CHANNEL_INSTRUCTIONS,
 });
 
 async function sendProgressNotification(
@@ -318,7 +308,6 @@ async function main() {
   await agyJobManager.initialize();
   const transport = new TaskStdioTransport("agy");
   server.onclose = () => {
-    stopChannel();
     mcpTasks.close();
     // The SDK aborts in-flight requests. Job processes and their queue keep running;
     // their open pipes keep this server alive until their results have been saved.
@@ -336,13 +325,11 @@ async function main() {
   process.stdin.once("close", disconnect);
   process.stdout.once("error", disconnect);
   await server.connect(transport);
-  stopChannel = startChannelNotifier(agyJobManager, server, "agy", Logger);
   Logger.debug("antigravity-mcp-server listening on stdio");
 }
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
-    stopChannel();
     mcpTasks.close();
     void agyJobManager.dispose().finally(() => process.exit(0));
   });

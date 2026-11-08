@@ -49,7 +49,6 @@ async function setup(f = fixture(), era: "legacy" | "modern" = "legacy") {
         ...process.env,
         AGENT_JOBS_HOME: f.home,
         AGENT_JOBS_MAX: "1",
-        CLAUDE_AGENTS: "0",
       },
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],

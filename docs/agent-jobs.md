@@ -71,14 +71,6 @@ Worktrees start from the recorded `HEAD` SHA, under `<root>.worktrees/<label>-<i
 
 After the job stops, collect with `remove: "none"`, `"worktree"`, or `"worktree+branch"`. Collection stages all files and diffs against the recorded base with `--binary`, capturing new files, binary files, and worker commits. It saves `patch.diff` before removal, returns a capped patch and full path, and reports removal failures. Applying the patch or merging the branch remains the caller's responsibility.
 
-## Claude Code channel notifications (opt-in)
-
-Claude Code Channels let an MCP server push events into a running session. To enable it, set `CLAUDE_AGENTS=1` in the server's environment and launch Claude Code with `claude-agents` (which runs `claude --dangerously-load-development-channels server:codex server:agy`).
-
-When the variable is unset, the server declares no extra capability and sends nothing, so other MCP clients see no change. When it is set, the server declares `experimental: { 'claude/channel': {} }`, adds one line to its instructions, and sends one notification per job when this server's own job reaches `completed`, `failed`, `killed`, `paused`, or `lost`. Jobs owned by other servers are never announced, and a job is not announced twice for the same state. If the session did not load the server as a channel, Claude Code drops the events silently.
-
-The payload is metadata only. The content is `agy job <state>: call agy_agent_result with this job_id` (with the reset time added for `paused`). The attributes are `job_id`, `state`, `agent`, plus `label` (sanitized to `[A-Za-z0-9_-]`, 40 characters at most), `reason`, and `reset_at` when known. Superseding a paused job sends one `killed` transition with `reason: "superseded"` and `superseded_by` identifying its replacement. Worker output (final text, stdout, stderr, patch) is never included, because it would be a prompt-injection vector; call `agy_agent_result` to read it. A failed push is logged and never affects the job.
-
 ## Usage
 
 `codex_usage` first asks a short-lived `codex app-server` for live quota without a model turn. If unavailable, it reads the newest `rate_limits` snapshot in `~/.codex/sessions`. `source` is `live` or `session-log` (also present when unavailable), with `available` and optional `reason`. Successful reports include `snapshotAt` (ISO), `snapshotAgeSec`, `meter`, and `fiveHour` / `weekly` windows. Each window has `usedPercent`, `windowMinutes`, `resetsAt` (epoch seconds), `resetAtIso`, and `resetIn`. Reset credits are reported when supplied; they are never spent automatically.
@@ -97,7 +89,7 @@ Run `npm test` for the fake-worker suite; it starts no real vendor CLIs. Real CL
 
 ## MCP tasks, diagnostics and worker bridge
 
-Only `agy_agent` and `agy_agent_follow` accept task augmentation. Tasks use the status-discriminated modern protocol; `tasks/get` and notifications never mark a result collected. Only `agy_agent_result` and `agy_agent_follow` write that marker. MCP-task jobs never emit channel events; other jobs require the `claude-agents` launcher (`CLAUDE_AGENTS=1`). Channel markers are independent of hook wake markers.
+Only `agy_agent` and `agy_agent_follow` accept task augmentation. Tasks use the status-discriminated modern protocol; `tasks/get` and notifications never mark a result collected. Only `agy_agent_result` and `agy_agent_follow` write that marker. MCP-task jobs wake Claude through the task; other jobs wake it through the multi-agent `hook-wait` hook.
 
 `agy_selftest` exercises the task transport using fake jobs. `agy_debug_log` reads the bounded traffic log; argument strings outside the metadata allowlist are redacted.
 

@@ -128,7 +128,7 @@ Legacy `bg-antigravity` and detached delegate jobs capture stdout directly to fi
 
 Background records stay in `~/.agy-mcp/bg/`. New records keep the full prompt in a separate file and stdout/stderr separately; old records remain readable. Tasks whose process disappeared without a recorded exit have unknown status. Delegate collection stages all changes, saves a binary-capable patch against the starting SHA, and returns at most 20k characters per output plus the patch path before optional cleanup.
 
-Shared jobs use `~/.agent-jobs` (overridable with `AGENT_JOBS_HOME`). The `claude-agents` launcher sets `CLAUDE_AGENTS=1` for metadata-only notifications (`claude --dangerously-load-development-channels server:codex server:agy`). `agy_usage` runs `agy -p /usage --output-format json`.
+Shared jobs use `~/.agent-jobs` (overridable with `AGENT_JOBS_HOME`). `agy_usage` runs `agy -p /usage --output-format json`.
 
 ## MCP tasks (no launch flag)
 
