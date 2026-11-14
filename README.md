@@ -1,3 +1,5 @@
+> **Retired fork.** The `agent-standard` work from this fork moved to [agents-jobs](https://github.com/PMARC14/agents-jobs) (private) on 2026-11-08. This repository is archived and no longer maintained.
+
 # Antigravity MCP Server
 
 MCP (Model Context Protocol) server for [Google Antigravity CLI](https://antigravity.google/docs/cli-getting-started) (`agy`) integration. Lets any MCP client (Claude Code, Claude Desktop, Cursor, etc.) delegate tasks to Antigravity's agentic CLI — with model selection (Gemini, Claude, GPT-OSS), conversation resume, and workspace controls.
